@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- Modifications Copyright (C) 2026 Ettacent -->
 <resources>
-    <string name="AppName">NimarkoGram</string>
+<string name="AppName">VEDAgram</string>
     <string name="NM_Header_ChatView">Chat view</string>
     <string name="NM_Header_Interaction">Interaction</string>
     <string name="NM_Header_Media">Media</string>
