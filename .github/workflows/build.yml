@@ -48,15 +48,20 @@ jobs:
           from pathlib import Path
           from PIL import Image
 
-          # App name and onboarding copy across all Android language variants.
+          # Replace visible string values only; keep Android resource keys unchanged.
           res = Path("TMessagesProj/src/main/res")
           if res.exists():
               for f in res.glob("values*/strings*.xml"):
                   old = f.read_text(encoding="utf-8")
-                  new = old.replace("NimarkoGram", "VEDAgram").replace("NIMARKOGRAM", "VEDAGRAM")
-                  for key, value in (("AppName","VEDAgram"),("AppNameBeta","VEDAgram Beta"),("exteraAppName","VEDAgram")):
-                      pattern = r'(<string\b[^>]*\bname="' + re.escape(key) + r'"[^>]*>).*?(</string>)'
-                      new = re.sub(pattern, lambda m: m.group(1)+value+m.group(2), new, flags=re.DOTALL)
+                  new = re.sub(
+                      r'(<string\\b[^>]*>)(.*?)(</string>)',
+                      lambda m: m.group(1) + m.group(2).replace("NimarkoGram", "VEDAgram").replace("NIMARKOGRAM", "VEDAGRAM") + m.group(3),
+                      old,
+                      flags=re.DOTALL,
+                  )
+                  for key, value in (("AppName", "VEDAgram"), ("AppNameBeta", "VEDAgram Beta"), ("exteraAppName", "VEDAgram")):
+                      pattern = r'(<string\\b[^>]*\\bname="' + re.escape(key) + r'"[^>]*>).*?(</string>)'
+                      new = re.sub(pattern, lambda m: m.group(1) + value + m.group(2), new, flags=re.DOTALL)
                   if new != old:
                       f.write_text(new, encoding="utf-8")
 
@@ -176,6 +181,46 @@ jobs:
           <button onclick="document.getElementById('status').textContent='No official update endpoint is configured. This screen will not download or install APK files.'">Check for updates</button>
           <p class="muted">Install updates only from the official VEDAgram release source.</p></main></html>""", encoding="utf-8")
           print("VEDA Update Center resources added.")
+          PY
+
+      - name: Add VEDA feature labels and strings
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          import re
+          root = Path("TMessagesProj/src/main/res")
+          values = root / "values"
+          values.mkdir(parents=True, exist_ok=True)
+          strings = values / "strings.xml"
+          if not strings.exists():
+              strings.write_text('<?xml version="1.0" encoding="utf-8"?>\\n<resources>\\n</resources>\\n', encoding="utf-8")
+          text = strings.read_text(encoding="utf-8")
+          entries = {
+              "veda_translate": "VEDA Translate",
+              "veda_translate_action": "Translate",
+              "veda_translate_original": "Show original",
+              "veda_translate_unavailable": "Translation service is not configured",
+              "veda_notify": "VEDA Notify",
+              "veda_notify_custom_sound": "Custom notification sound",
+              "veda_notify_mute_until": "Mute until",
+              "veda_notify_per_chat": "Per-chat notifications",
+              "veda_new_badge": "Новый",
+              "veda_new_features": "New features",
+              "veda_dark_design": "VEDA Dark Design",
+              "veda_theme_purple": "VEDA Purple",
+              "veda_theme_black": "VEDA Black",
+          }
+          for key, value in entries.items():
+              line = f'<string name="{key}">{value}</string>'
+              pattern = r'<string\\b[^>]*\\bname="' + re.escape(key) + r'"[^>]*>.*?</string>'
+              if re.search(pattern, text, flags=re.DOTALL):
+                  text = re.sub(pattern, lambda _: line, text, count=1, flags=re.DOTALL)
+              else:
+                  text = text.replace("</resources>", "    " + line + "\\n</resources>", 1)
+          strings.write_text(text, encoding="utf-8")
+          print("VEDA feature labels/resources added (UI integration still requires source changes).")
           PY
 
       - name: Install Android native tools
