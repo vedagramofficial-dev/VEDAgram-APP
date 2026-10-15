@@ -1,0 +1,1628 @@
+/* Modifications Copyright (C) 2026 Ettacent */
+
+/*
+ * This is the source code of Telegram for Android v. 5.x.x.
+ * It is licensed under GNU GPL v. 2 or later.
+ * You should have received a copy of the license in this archive (see LICENSE).
+ *
+ * Copyright Nikolai Kudashov, 2013-2018.
+ */
+
+package org.telegram.ui.Components;
+
+import static org.telegram.messenger.AndroidUtilities.dp;
+
+import android.graphics.Bitmap;
+import android.graphics.Canvas;
+import android.graphics.Color;
+import android.graphics.ColorFilter;
+import android.graphics.Matrix;
+import android.graphics.Paint;
+import android.graphics.Path;
+import android.graphics.PixelFormat;
+import android.graphics.PorterDuff;
+import android.graphics.PorterDuffXfermode;
+import android.graphics.Rect;
+import android.graphics.RectF;
+import android.graphics.Shader;
+import android.graphics.Xfermode;
+import android.graphics.drawable.Animatable;
+import android.graphics.drawable.BitmapDrawable;
+import android.os.SystemClock;
+import android.util.Log;
+import android.view.View;
+
+import androidx.annotation.AnyThread;
+import androidx.annotation.Nullable;
+import androidx.annotation.UiThread;
+import androidx.annotation.WorkerThread;
+
+import org.telegram.messenger.AndroidUtilities;
+import org.telegram.messenger.AnimatedFileDrawableStream;
+import org.telegram.messenger.DispatchQueue;
+import org.telegram.messenger.DispatchQueuePoolBackground;
+import org.telegram.messenger.FileLoader;
+import org.telegram.messenger.FileLog;
+import org.telegram.messenger.ImageLocation;
+import org.telegram.messenger.ImageReceiver;
+import org.telegram.messenger.MessageObject;
+import org.telegram.messenger.SharedConfig;
+import org.telegram.messenger.utils.BitmapsCache;
+import org.telegram.messenger.utils.Choreographer60FpsContent;
+import org.telegram.tgnet.TLRPC;
+
+import java.io.File;
+import java.lang.ref.WeakReference;
+import java.util.ArrayList;
+import java.util.concurrent.ScheduledThreadPoolExecutor;
+import java.util.concurrent.ThreadPoolExecutor;
+import me.vkryl.core.reference.ReferenceList;
+
+public final class AnimatedFileDrawable extends BitmapDrawable implements Animatable, BitmapsCache.Cacheable {
+
+    public boolean skipFrameUpdate;
+    public long currentTime;
+
+    private static final boolean USE_BITMAP_SHADER = true; // Build.VERSION.SDK_INT < 29;
+    private boolean PRERENDER_FRAME;
+
+    private long lastFrameTime;
+    private int lastTimeStamp;
+    private int invalidateAfter = 50;
+    private final int[] metaData = new int[8];
+    private Runnable loadFrameTask;
+    private boolean isStaticVideoDetected;
+
+    private final ArrayList<AnimatedFileBuffer> unusedBuffers = new ArrayList<>();
+    private AnimatedFileBuffer renderingBuffer;
+    private AnimatedFileBuffer nextRenderingBuffer;
+    private AnimatedFileBuffer nextRenderingBuffer2;
+    private AnimatedFileBuffer backgroundBuffer;
+    private static final long GIF_LOOP_BLEND_MS = 100;
+    private boolean gifLoopBlendEnabled;
+    private final boolean videoPreviewLoopBlendEligible;
+    public void enableVideoPreviewLoopBlend() {
+        if (videoPreviewLoopBlendEligible && !isWebmSticker
+                && !MessageObject.isRoundVideoDocument(document)) {
+            gifLoopBlendEnabled = true;
+        }
+    }
+    private final Object frameLock = new Object();
+    private volatile long gifPlaybackGeneration;
+    private long lastDecodedGifGeneration = -1;
+    private AnimatedFileBuffer gifLoopBuffer;
+    private long gifLoopBlendStart;
+    private final Runnable gifLoopInvalidate = this::invalidateGifLoop;
+
+    private boolean destroyWhenDone;
+    private boolean decoderCreated;
+    private boolean decodeSingleFrame;
+    private boolean singleFrameDecoded;
+    private boolean forceDecodeAfterNextFrame;
+    private final File path;
+    private final long streamFileSize;
+    private final int streamLoadingPriority;
+    private final int currentAccount;
+    private boolean recycleWithSecond;
+    private volatile long pendingSeekTo = -1;
+    private volatile long pendingSeekToUI = -1;
+    private boolean pendingRemoveLoading;
+    private int pendingRemoveLoadingFramesReset;
+    private boolean isRestarted;
+    private final Object sync = new Object();
+
+    private boolean invalidateParentViewWithSecond;
+
+    private long lastFrameDecodeTime;
+
+    private final RectF actualDrawRect = new RectF();
+    private final int[] roundRadius = new int[4];
+    private int[] roundRadiusBackup;
+    private final Matrix[] shaderMatrix = new Matrix[1 + DrawingInBackgroundThreadDrawable.THREAD_COUNT];
+    private final Path[] roundPath = new Path[1 + DrawingInBackgroundThreadDrawable.THREAD_COUNT];
+    private final float[][] radii = new float[1 + DrawingInBackgroundThreadDrawable.THREAD_COUNT][];
+
+    private float scaleX = 1.0f;
+    private float scaleY = 1.0f;
+    private boolean applyTransformation;
+    private final RectF dstRect = new RectF();
+    private volatile boolean isRunning;
+    private volatile boolean isRecycled;
+    private volatile AnimatedFileNative mDecoder;
+    private boolean ptrFail;
+    private DispatchQueue decodeQueue;
+    private float startTime;
+    private float endTime;
+    private int renderingHeight;
+    private int renderingWidth;
+    private final boolean loop;
+    private final boolean precache;
+    private float scaleFactor = 1f;
+    public boolean isWebmSticker;
+    private final TLRPC.Document document;
+    private final RectF[] dstRectBackground = new RectF[DrawingInBackgroundThreadDrawable.THREAD_COUNT];
+    private final Paint[] backgroundPaint = new Paint[DrawingInBackgroundThreadDrawable.THREAD_COUNT];
+
+    private @Nullable WeakReference<View> parentView;
+    private final ReferenceList<View> secondParentViews = new ReferenceList<>(true);
+    private final ReferenceList<ImageReceiver> parents = new ReferenceList<>(true);
+
+    private AnimatedFileDrawableStream stream;
+
+    private boolean useSharedQueue;
+    private boolean invalidatePath = true;
+    private boolean limitFps;
+
+    public int repeatCount;
+    private final BitmapsCache bitmapsCache;
+    BitmapsCache.Metadata cacheMetadata;
+
+    private static final ScheduledThreadPoolExecutor executor = new ScheduledThreadPoolExecutor(8, new ThreadPoolExecutor.DiscardPolicy());
+
+    private final Runnable uiRunnableNoFrame = this::uiRunnableNoFrameImpl;
+
+    @UiThread
+    private void uiRunnableNoFrameImpl() {
+        loadFrameTask = null;
+        if (isRecycled || destroyWhenDone) {
+            chekDestroyDecoder();
+            return;
+        }
+        if (pendingSeekToUI >= 0 && pendingSeekTo == -1) {
+            pendingSeekToUI = -1;
+            invalidateAfter = 0;
+        }
+        scheduleNextGetFrame();
+        invalidateInternal();
+    }
+
+
+    boolean generatingCache;
+    private CacheGenerationTask cacheGenRunnable;
+    private volatile boolean cacheGenerationFailed;
+    private final Runnable uiRunnableGenerateCache = this::uiRunnableGenerateCacheImpl;
+
+    @UiThread
+    private void uiRunnableGenerateCacheImpl() {
+        if (!isRecycled && !destroyWhenDone && !generatingCache && cacheGenRunnable == null && !cacheGenerationFailed) {
+            if (RLottieDrawable.lottieCacheGenerateQueue == null) {
+                RLottieDrawable.createCacheGenQueue();
+            }
+            generatingCache = true;
+            loadFrameTask = null;
+            BitmapsCache.incrementTaskCounter();
+            cacheGenRunnable = new CacheGenerationTask();
+            RLottieDrawable.lottieCacheGenerateQueue.postRunnable(cacheGenRunnable);
+        }
+    }
+    private final class CacheGenerationTask implements Runnable {
+        final java.util.concurrent.atomic.AtomicInteger state = new java.util.concurrent.atomic.AtomicInteger();
+        @Override
+        public void run() {
+            if (!state.compareAndSet(0, 1)) return;
+            try {
+                bitmapsCache.createCache();
+            } catch (Throwable e) {
+                FileLog.e(e);
+            } finally {
+                AndroidUtilities.runOnUIThread(() -> finishCacheGeneration(this));
+            }
+        }
+    }
+    private void finishCacheGeneration(CacheGenerationTask task) {
+        if (cacheGenRunnable != task) return;
+        BitmapsCache.decrementTaskCounter();
+        cacheGenRunnable = null;
+        generatingCache = false;
+        cacheGenerationFailed = bitmapsCache.needGenCache();
+        chekDestroyDecoder();
+        if (!isRecycled && !destroyWhenDone) scheduleNextGetFrame();
+    }
+    private void cancelQueuedCacheGeneration() {
+        CacheGenerationTask task = cacheGenRunnable;
+        if (task == null || !task.state.compareAndSet(0, 2)) return;
+        RLottieDrawable.lottieCacheGenerateQueue.cancelRunnable(task);
+        BitmapsCache.decrementTaskCounter();
+        cacheGenRunnable = null;
+        generatingCache = false;
+    }
+
+    @UiThread
+    private void chekDestroyDecoder() {
+        if (isRecycled || destroyWhenDone) {
+            releaseResources();
+            return;
+        }
+        if (!canLoadFrames()) {
+            synchronized (frameLock) {
+                clearGifLoopBlend();
+                if (renderingBuffer != null) {
+                    renderingBuffer.recycle();
+                    renderingBuffer = null;
+                }
+                if (backgroundBuffer != null) {
+                    backgroundBuffer.recycle();
+                    backgroundBuffer = null;
+                }
+                if (decodeQueue != null) {
+                    decodeQueue.recycle();
+                    decodeQueue = null;
+                }
+                synchronized (unusedBuffers) {
+                    for (int i = 0; i < unusedBuffers.size(); i++) {
+                        unusedBuffers.get(i).recycle();
+                    }
+                    unusedBuffers.clear();
+                }
+            }
+            invalidateInternal();
+        }
+    }
+
+    @UiThread
+    public void invalidateInternal() {
+        for (ImageReceiver imageReceiver : parents) {
+            imageReceiver.invalidate();
+        }
+    }
+
+    private final Runnable uiRunnable = this::uiRunnableImpl;
+
+    @UiThread
+    private void uiRunnableImpl() {
+        loadFrameTask = null;
+        if (isRecycled || destroyWhenDone) {
+            chekDestroyDecoder();
+            return;
+        }
+        if (backgroundBuffer == null || !backgroundBuffer.hasFrame) {
+            uiRunnableNoFrameImpl();
+            return;
+        }
+        if (stream != null && pendingRemoveLoading) {
+            FileLoader.getInstance(currentAccount).removeLoadingVideo(stream.getDocument(), false, false);
+        }
+        if (pendingRemoveLoadingFramesReset <= 0) {
+            pendingRemoveLoading = true;
+        } else {
+            pendingRemoveLoadingFramesReset--;
+        }
+        if (!forceDecodeAfterNextFrame) {
+            singleFrameDecoded = true;
+        } else {
+            forceDecodeAfterNextFrame = false;
+        }
+        if (pendingSeekToUI >= 0) {
+            nextRenderingBuffer = backgroundBuffer;
+            nextRenderingBuffer2 = null;
+        } else if (!PRERENDER_FRAME) {
+            nextRenderingBuffer = backgroundBuffer;
+        } else {
+            if (nextRenderingBuffer == null && nextRenderingBuffer2 == null) {
+                nextRenderingBuffer = backgroundBuffer;
+            } else if (nextRenderingBuffer == null) {
+                nextRenderingBuffer = nextRenderingBuffer2;
+                nextRenderingBuffer2 = backgroundBuffer;
+            } else {
+                nextRenderingBuffer2 = backgroundBuffer;
+            }
+        }
+        backgroundBuffer = null;
+
+        if (isRestarted) {
+            isRestarted = false;
+            repeatCount++;
+            checkRepeat();
+        }
+
+        if (metaData[3] < lastTimeStamp) {
+            lastTimeStamp = startTime > 0 ? (int) (startTime * 1000) : 0;
+        }
+        if (metaData[3] - lastTimeStamp != 0) {
+            invalidateAfter = metaData[3] - lastTimeStamp;
+            if (limitFps && invalidateAfter < 32) {
+                invalidateAfter = 32;
+            }
+        }
+        if (pendingSeekToUI >= 0 && pendingSeekTo == -1) {
+            pendingSeekToUI = -1;
+            invalidateAfter = 0;
+        }
+        lastTimeStamp = metaData[3];
+        for (View view : secondParentViews) {
+            view.invalidate();
+        }
+        if (!isRunning && decodeSingleFrame || renderingBuffer == null && nextRenderingBuffer != null) {
+            invalidateInternal();
+        }
+        scheduleNextGetFrame();
+    }
+
+
+    public void checkRepeat() {
+        int count = 0;
+        int oCount = 0;
+        for (ImageReceiver parent : parents) {
+            if (!parent.isAttachedToWindow()) {
+                parents.remove(parent);
+            } else {
+                oCount++;
+            }
+            if (parent.animatedFileDrawableRepeatMaxCount > 0 && repeatCount >= parent.animatedFileDrawableRepeatMaxCount) {
+                count++;
+            }
+        }
+        if (oCount == count) {
+            stop();
+        } else {
+            start();
+        }
+    }
+
+    private int decoderTryCount = 0;
+    private final int MAX_TRIES = 15;
+    private final Runnable loadFrameRunnable = this::loadFrameRunnableImpl;
+
+    @WorkerThread
+    private void loadFrameRunnableImpl() {
+        if (isRecycled) {
+            AndroidUtilities.runOnUIThread(uiRunnable);
+            return;
+        }
+
+        if (!decoderCreated && mDecoder == null) {
+            mDecoder = AnimatedFileNative.createDecoderFrom(path.getAbsolutePath(), metaData, currentAccount, streamFileSize, stream, false);
+            ptrFail = mDecoder == null && (!isWebmSticker || decoderTryCount > MAX_TRIES);
+            if (mDecoder != null && (metaData[0] > 3840 || metaData[1] > 3840)) {
+                mDecoder.recycle();
+                mDecoder = null;
+            }
+            adaptRenderingSize();
+            updateScaleFactor();
+            decoderCreated = !isWebmSticker || mDecoder != null || (decoderTryCount++) > MAX_TRIES;
+            AndroidUtilities.runOnUIThread(AnimatedFileDrawable.this::checkChoreographerInternal);
+        }
+        try {
+            final long frameGeneration = gifPlaybackGeneration;
+            if (bitmapsCache != null && !cacheGenerationFailed) {
+                if (backgroundBuffer == null) {
+                    backgroundBuffer = takeUnusedBuffer();
+                    if (backgroundBuffer == null) {
+                        backgroundBuffer = AnimatedFileBuffer.of(renderingWidth, renderingHeight);
+                    }
+                }
+                if (cacheMetadata == null) {
+                    cacheMetadata = new BitmapsCache.Metadata();
+                }
+                backgroundBuffer.hasFrame = false;
+                lastFrameDecodeTime = System.currentTimeMillis();
+                int lastFrame = cacheMetadata.frame;
+                int result = bitmapsCache.getFrame(backgroundBuffer.bitmap, cacheMetadata);
+                if (result != -1 && cacheMetadata.frame < lastFrame) {
+                    isRestarted = true;
+                }
+                metaData[3] = backgroundBuffer.time = cacheMetadata.frame * Math.max(16, metaData[4] / Math.max(1, bitmapsCache.getFrameCount()));
+                backgroundBuffer.opaque = false; // unknown
+                backgroundBuffer.startsGifLoop = false;
+                backgroundBuffer.gifPlaybackGeneration = frameGeneration;
+
+                if (bitmapsCache.needGenCache()) {
+                    AndroidUtilities.runOnUIThread(uiRunnableGenerateCache);
+                } else if (result == -1) {
+                    cacheGenerationFailed = true;
+                }
+                if (result == -1) {
+                    AndroidUtilities.runOnUIThread(uiRunnableNoFrame);
+                } else {
+                    backgroundBuffer.hasFrame = true;
+                    AndroidUtilities.runOnUIThread(uiRunnable);
+                }
+                return;
+            }
+
+            if (mDecoder != null || metaData[0] == 0 || metaData[1] == 0) {
+                if (backgroundBuffer == null && metaData[0] > 0 && metaData[1] > 0) {
+                    try {
+                        backgroundBuffer = takeUnusedBuffer();
+                        if (backgroundBuffer == null) {
+                            backgroundBuffer = AnimatedFileBuffer.of((int) (metaData[0] * scaleFactor), (int) (metaData[1] * scaleFactor));
+                        }
+                    } catch (Throwable e) {
+                        FileLog.e(e);
+                    }
+                }
+                boolean seekWas = false;
+                if (pendingSeekTo >= 0) {
+                    metaData[3] = (int) pendingSeekTo;
+                    long seekTo = pendingSeekTo;
+                    synchronized (sync) {
+                        pendingSeekTo = -1;
+                    }
+                    seekWas = true;
+                    if (stream != null) {
+                        stream.reset();
+                    }
+                    mDecoder.seekToMs(seekTo, true);
+                }
+                if (backgroundBuffer != null) {
+                    backgroundBuffer.hasFrame = false;
+                    backgroundBuffer.startsGifLoop = false;
+                    backgroundBuffer.gifPlaybackGeneration = frameGeneration;
+                    lastFrameDecodeTime = System.currentTimeMillis();
+
+                    if (mDecoder.getVideoFrame(backgroundBuffer.bitmap, false, startTime, endTime, loop) == 0) {
+                        AndroidUtilities.runOnUIThread(uiRunnableNoFrame);
+                        return;
+                    }
+                    if (!isStaticVideoDetected) {
+                        isStaticVideoDetected = mDecoder.isStaticVideoDetected();
+                    }
+                    final boolean timestampWrapped = !seekWas && metaData[3] < lastTimeStamp;
+                    if (timestampWrapped && (!gifLoopBlendEnabled || isWebmSticker
+                            || frameGeneration == lastDecodedGifGeneration && frameGeneration == gifPlaybackGeneration
+                            && pendingSeekTo < 0 && pendingSeekToUI < 0)) {
+                        isRestarted = true;
+                        backgroundBuffer.startsGifLoop = loop && frameGeneration == gifPlaybackGeneration
+                            && pendingSeekTo < 0 && pendingSeekToUI < 0;
+                    }
+                    if (seekWas) {
+                        lastTimeStamp = metaData[3];
+                    }
+                    lastDecodedGifGeneration = frameGeneration;
+
+                    backgroundBuffer.time = metaData[3];
+                    backgroundBuffer.opaque = mDecoder.isLastFrameOpaque();
+                    backgroundBuffer.hasFrame = true;
+                }
+            } else {
+                AndroidUtilities.runOnUIThread(uiRunnableNoFrame);
+                return;
+            }
+        } catch (Throwable e) {
+            FileLog.e(e);
+            AndroidUtilities.runOnUIThread(uiRunnableNoFrame);
+            return;
+        }
+        AndroidUtilities.runOnUIThread(uiRunnable);
+    }
+
+
+    private void adaptRenderingSize() {
+        if (renderingWidth == 0 && renderingHeight == 0) {
+            if (metaData[0] > 3000 || metaData[1] > 3000) {
+                renderingWidth = metaData[0] / 4;
+                renderingHeight = metaData[1] / 4;
+            } else if (metaData[0] > 2200 || metaData[1] > 2200) {
+                renderingWidth = metaData[0] / 2;
+                renderingHeight = metaData[1] / 2;
+            }
+        }
+    }
+
+    private void updateScaleFactor() {
+        if (!isWebmSticker && renderingHeight > 0 && renderingWidth > 0 && metaData[0] > 0 && metaData[1] > 0) {
+            scaleFactor = Math.max(renderingWidth / (float) metaData[0], renderingHeight / (float) metaData[1]);
+            if (scaleFactor <= 0 || scaleFactor > 0.7) {
+                scaleFactor = 1;
+            }
+        } else {
+            scaleFactor = 1f;
+        }
+    }
+
+    private final Runnable mStartTask = this::uiStartTaskImpl;
+
+    @UiThread
+    private void uiStartTaskImpl() {
+        for (View view : secondParentViews) {
+            view.invalidate();
+        }
+        final View parentView = this.parentView != null ? this.parentView.get() : null;
+        if ((secondParentViews.isEmpty() || invalidateParentViewWithSecond) && parentView != null) {
+            parentView.invalidate();
+        }
+    }
+
+    public AnimatedFileDrawable(File file, boolean createDecoder, long streamSize, int streamLoadingPriority, TLRPC.Document document, ImageLocation location, Object parentObject, long seekTo, int account, boolean preview, BitmapsCache.CacheOptions cacheOptions) {
+        this(file, createDecoder, streamSize, streamLoadingPriority, document, location, parentObject, seekTo, account, preview, 0, 0, cacheOptions);
+    }
+
+    public AnimatedFileDrawable(File file, boolean createDecoder, long streamSize, int streamLoadingPriority, TLRPC.Document document, ImageLocation location, Object parentObject, long seekTo, int account, boolean preview, int w, int h, BitmapsCache.CacheOptions cacheOptions) {
+        this(file, createDecoder, streamSize, streamLoadingPriority, document, location, parentObject, seekTo, account, preview, w, h, cacheOptions, document != null ? 1 : 0, true);
+    }
+
+    public AnimatedFileDrawable(File file, boolean createDecoder, long streamSize, int streamLoadingPriority, TLRPC.Document document, ImageLocation location, Object parentObject, long seekTo, int account, boolean preview, int w, int h, BitmapsCache.CacheOptions cacheOptions, int cacheType, boolean loop) {
+        path = file;
+        PRERENDER_FRAME = SharedConfig.deviceIsAboveAverage();
+        streamFileSize = streamSize;
+        this.streamLoadingPriority = streamLoadingPriority;
+        currentAccount = account;
+        renderingHeight = h;
+        renderingWidth = w;
+        this.loop = loop;
+        this.precache = cacheOptions != null && renderingWidth > 0 && renderingHeight > 0;
+        this.document = document;
+        videoPreviewLoopBlendEligible = loop && !preview && !this.precache;
+        gifLoopBlendEnabled = loop && !preview && !this.precache
+            && MessageObject.isGifDocument(document) && !MessageObject.isRoundVideoDocument(document);
+        getPaint().setFlags(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
+        if (streamSize != 0 && (document != null || location != null)) {
+            stream = new AnimatedFileDrawableStream(document, location, parentObject, account, preview, streamLoadingPriority, cacheType);
+        }
+        if (createDecoder && !this.precache) {
+            mDecoder = AnimatedFileNative.createDecoderFrom(file.getAbsolutePath(), metaData, currentAccount, streamFileSize, stream, preview);
+            ptrFail = mDecoder == null && (!isWebmSticker || decoderTryCount > MAX_TRIES);
+            if (mDecoder != null && (metaData[0] > 3840 || metaData[1] > 3840)) {
+                mDecoder.recycle();
+                mDecoder = null;
+            }
+            adaptRenderingSize();
+            updateScaleFactor();
+            decoderCreated = true;
+        }
+        BitmapsCache bitmapsCache = null;
+        if (this.precache) {
+            mDecoder = AnimatedFileNative.createDecoderFrom(file.getAbsolutePath(), metaData, currentAccount, streamFileSize, stream, preview);
+            ptrFail = mDecoder == null && (!isWebmSticker || decoderTryCount > MAX_TRIES);
+            if (mDecoder != null && (metaData[0] > 3840 || metaData[1] > 3840)) {
+                mDecoder.recycle();
+                mDecoder = null;
+            } else {
+                bitmapsCache = new BitmapsCache(file, this, cacheOptions, renderingWidth, renderingHeight, !limitFps);
+            }
+        }
+        this.bitmapsCache = bitmapsCache;
+        if (seekTo != 0) {
+            seekTo(seekTo, false);
+        }
+    }
+
+    public void setIsWebmSticker(boolean b) {
+        resetGifLoopBlend();
+        isWebmSticker = b;
+        if (isWebmSticker) {
+            PRERENDER_FRAME = false;
+            useSharedQueue = true;
+        }
+    }
+
+    public void setLimitFps(boolean limitFps) {
+        this.limitFps = limitFps;
+        if (limitFps) {
+            PRERENDER_FRAME = false;
+        }
+    }
+
+
+    @AnyThread
+    @Nullable
+    public Bitmap getFrameAtTime(long ms) {
+        return getFrameAtTime(ms, false);
+    }
+
+    @AnyThread
+    @Nullable
+    public Bitmap getFrameAtTime(long ms, boolean precise) {
+        resetGifLoopBlend();
+        if (!decoderCreated || mDecoder == null) {
+            return null;
+        }
+        if (stream != null) {
+            stream.cancel(false);
+            stream.reset();
+        }
+        if (!precise) {
+            mDecoder.seekToMs(ms, precise);
+        }
+        Bitmap backgroundBitmap = Bitmap.createBitmap(metaData[0], metaData[1], Bitmap.Config.ARGB_8888);
+        int result;
+        if (precise) {
+            result = mDecoder.getFrameAtTime(ms, backgroundBitmap);
+        } else {
+            result = mDecoder.getVideoFrame(backgroundBitmap, true, (float) 0, (float) 0, true);
+        }
+        if (result != 0) {
+            return backgroundBitmap;
+        } else {
+            backgroundBitmap.recycle();
+            return null;
+        }
+    }
+
+    public void setParentView(View view) {
+        if (parentView != null) {
+            return;
+        }
+        parentView = new WeakReference<>(view);
+    }
+
+    public void addParent(ImageReceiver imageReceiver) {
+        if (imageReceiver != null) {
+            if (parents.add(imageReceiver)) {
+                if (isRunning) {
+                    scheduleNextGetFrame();
+                }
+            }
+        }
+        checkCacheCancel();
+    }
+
+    public void removeParent(ImageReceiver imageReceiver) {
+        parents.remove(imageReceiver);
+        if (parents.isEmpty()) {
+            repeatCount = 0;
+            resetGifLoopBlend();
+        }
+        checkCacheCancel();
+    }
+
+    private Runnable cancelCache;
+
+    public void checkCacheCancel() {
+        if (bitmapsCache == null) {
+            return;
+        }
+        boolean mustCancel = parents.isEmpty();
+        if (mustCancel && cancelCache == null) {
+            AndroidUtilities.runOnUIThread(cancelCache = () -> {
+                if (bitmapsCache != null) {
+                    bitmapsCache.cancelCreate();
+                }
+            }, 600);
+        } else if (!mustCancel && cancelCache != null) {
+            AndroidUtilities.cancelRunOnUIThread(cancelCache);
+            cancelCache = null;
+        }
+    }
+
+    public void setInvalidateParentViewWithSecond(boolean value) {
+        invalidateParentViewWithSecond = value;
+    }
+
+    public void addSecondParentView(View view) {
+        if (view != null) {
+            secondParentViews.add(view);
+        }
+    }
+
+    public void removeSecondParentView(View view) {
+        secondParentViews.remove(view);
+        if (secondParentViews.isEmpty()) {
+            if (recycleWithSecond) {
+                recycle();
+            } else {
+                if (roundRadiusBackup != null) {
+                    setRoundRadius(roundRadiusBackup);
+                }
+            }
+        }
+    }
+
+    public void setAllowDecodeSingleFrame(boolean value) {
+        decodeSingleFrame = value;
+        if (decodeSingleFrame) {
+            scheduleNextGetFrame();
+        }
+    }
+
+    public void seekTo(long ms, boolean removeLoading) {
+        seekTo(ms, removeLoading, false);
+    }
+
+    public void seekTo(long ms, boolean removeLoading, boolean force) {
+        resetGifLoopBlend();
+        synchronized (sync) {
+            pendingSeekTo = ms;
+            pendingSeekToUI = ms;
+            scheduledForSeek = false;
+            if (mDecoder != null) {
+                mDecoder.prepareToSeek();
+            }
+            if (decoderCreated && stream != null) {
+                stream.cancel(removeLoading);
+                pendingRemoveLoading = removeLoading;
+                pendingRemoveLoadingFramesReset = pendingRemoveLoading ? 0 : 10;
+            }
+            if (force && decodeSingleFrame) {
+                singleFrameDecoded = false;
+                if (loadFrameTask == null) {
+                    scheduleNextGetFrame(false, true);
+                } else {
+                    forceDecodeAfterNextFrame = true;
+                }
+            }
+        }
+    }
+
+    public void seekToSync(long ms) {
+        resetGifLoopBlend();
+        if (mDecoder == null) return;
+        mDecoder.seekToMs(ms, true);
+    }
+
+    public void recycle() {
+        if (!secondParentViews.isEmpty()) {
+            recycleWithSecond = true;
+            return;
+        }
+        isRunning = false;
+        isRecycled = true;
+        destroyWhenDone = true;
+        resetGifLoopBlend();
+        checkChoreographer();
+        cancelQueuedCacheGeneration();
+        if (stream != null) {
+            stream.cancel(true);
+            stream = null;
+        }
+        if (loadFrameTask == null) {
+            releaseResources();
+        } else if (mDecoder != null) {
+            mDecoder.stopDecoder();
+        }
+        invalidateInternal();
+    }
+
+    @UiThread
+    private void releaseResources() {
+        if (cacheGenRunnable != null) return; // worker still owns cache/native buffers
+        synchronized (frameLock) {
+            releaseResourcesLocked();
+        }
+    }
+    private void releaseResourcesLocked() {
+        clearGifLoopBlend();
+        if (mDecoder != null) {
+            mDecoder.recycle();
+            mDecoder = null;
+        }
+
+        ArrayList<Bitmap> bitmapToRecycle = new ArrayList<>();
+        addBufferBitmap(bitmapToRecycle, renderingBuffer);
+        addBufferBitmap(bitmapToRecycle, nextRenderingBuffer);
+        addBufferBitmap(bitmapToRecycle, nextRenderingBuffer2);
+        addBufferBitmap(bitmapToRecycle, backgroundBuffer);
+        synchronized (unusedBuffers) {
+            for (AnimatedFileBuffer buffer : unusedBuffers) {
+                addBufferBitmap(bitmapToRecycle, buffer);
+            }
+            unusedBuffers.clear();
+        }
+        renderingBuffer = null;
+        nextRenderingBuffer = null;
+        nextRenderingBuffer2 = null;
+        backgroundBuffer = null;
+
+        if (decodeQueue != null) {
+            decodeQueue.recycle();
+            decodeQueue = null;
+        }
+        getPaint().setShader(null);
+        AndroidUtilities.recycleBitmaps(bitmapToRecycle);
+        destroyWhenDone = false;
+    }
+
+    private static void addBufferBitmap(ArrayList<Bitmap> bitmaps, AnimatedFileBuffer buffer) {
+        if (buffer != null && buffer.bitmap != null && !bitmaps.contains(buffer.bitmap)) {
+            bitmaps.add(buffer.bitmap);
+        }
+    }
+
+    public void resetStream(boolean stop) {
+        resetGifLoopBlend();
+        if (stream != null) {
+            stream.cancel(true);
+        }
+        if (mDecoder != null) {
+            if (stop) {
+                mDecoder.stopDecoder();
+            } else {
+                mDecoder.prepareToSeek();
+            }
+        }
+    }
+
+    public void setUseSharedQueue(boolean value) {
+        if (isWebmSticker) {
+            return;
+        }
+        useSharedQueue = value;
+    }
+
+    @Override
+    protected void finalize() throws Throwable {
+        try {
+            secondParentViews.clear();
+            recycle();
+        } finally {
+            super.finalize();
+        }
+    }
+
+    @Override
+    public int getOpacity() {
+        return PixelFormat.TRANSPARENT;
+    }
+
+    @Override
+    @AnyThread
+    public void start() {
+        if (isRunning || parents.isEmpty()) {
+            return;
+        }
+        isRunning = true;
+        isPaused = false;
+        scheduleNextGetFrame();
+        AndroidUtilities.runOnUIThread(mStartTask);
+        checkChoreographer();
+    }
+
+    public float getCurrentProgress() {
+        if (metaData[4] == 0) {
+            return 0;
+        }
+        if (pendingSeekToUI >= 0) {
+            return pendingSeekToUI / (float) metaData[4];
+        }
+        return metaData[3] / (float) metaData[4];
+    }
+
+    public int getCurrentProgressMs() {
+        if (pendingSeekToUI >= 0) {
+            return (int) pendingSeekToUI;
+        }
+        if (nextRenderingBuffer != null && nextRenderingBuffer.time != 0) {
+            return nextRenderingBuffer.time;
+        }
+        if (renderingBuffer != null) {
+            return renderingBuffer.time;
+        }
+        return 0;
+    }
+
+    public int getProgressMs() {
+        return metaData[3];
+    }
+
+    public int getDurationMs() {
+        return metaData[4];
+    }
+
+    @AnyThread
+    private void scheduleNextGetFrame() {
+        scheduleNextGetFrame(true, false);
+    }
+    private boolean scheduledForSeek;
+
+    @AnyThread  // maybe ui thread only
+    private void scheduleNextGetFrame(boolean wait, boolean cancel) {
+        final boolean ignoreScheduleNext = loadFrameTask != null && !cancel
+            || (!PRERENDER_FRAME || nextRenderingBuffer2 != null && !(!scheduledForSeek && pendingSeekToUI >= 0)) && nextRenderingBuffer != null
+            || renderingBuffer != null && isStaticVideoDetected
+            || !canLoadFrames()
+            || destroyWhenDone
+            || !isRunning && (!decodeSingleFrame || singleFrameDecoded)
+            || parents.isEmpty()
+            || generatingCache;
+
+        if (ignoreScheduleNext) {
+            return;
+        }
+        if (useSharedQueue) {
+            if (limitFps) {
+                DispatchQueuePoolBackground.execute(loadFrameTask = loadFrameRunnable);
+            } else {
+                if (cancel && loadFrameTask != null) {
+                    executor.remove(loadFrameTask);
+                }
+                executor.execute(loadFrameTask = loadFrameRunnable);
+            }
+        } else {
+            if (decodeQueue == null) {
+                decodeQueue = new DispatchQueue("decodeQueue" + this);
+            }
+            if (cancel && loadFrameTask != null) {
+                decodeQueue.cancelRunnable(loadFrameTask);
+            }
+            decodeQueue.postRunnable(loadFrameTask = loadFrameRunnable, 0);
+        }
+        scheduledForSeek = true;
+    }
+
+    public boolean isLoadingStream() {
+        return stream != null && stream.isWaitingForLoad();
+    }
+
+    @Override
+    public void stop() {
+        isRunning = false;
+        resetGifLoopBlend();
+        checkChoreographer();
+    }
+
+    @Override
+    public boolean isRunning() {
+        return isRunning;
+    }
+
+    @Override
+    public int getIntrinsicHeight() {
+        int height = decoderCreated ? (metaData[2] == 90 || metaData[2] == 270 ? metaData[0] : metaData[1]) : 0;
+        if (height == 0) {
+            return dp(100);
+        } else {
+            height = (int) (height * scaleFactor);
+        }
+        return height;
+    }
+
+    @Override
+    public int getIntrinsicWidth() {
+        int width = decoderCreated ? (metaData[2] == 90 || metaData[2] == 270 ? metaData[1] : metaData[0]) : 0;
+        if (width == 0) {
+            return dp(100);
+        } else {
+            width = (int) (width * scaleFactor);
+        }
+        return width;
+    }
+
+    @Override
+    protected void onBoundsChange(Rect bounds) {
+        super.onBoundsChange(bounds);
+        applyTransformation = true;
+    }
+
+    @Override
+    @AnyThread
+    public void draw(Canvas canvas) {
+        drawInternal(canvas, false, System.currentTimeMillis(), 0);
+    }
+
+    @WorkerThread
+    public void drawInBackground(Canvas canvas, float x, float y, float w, float h, int alpha, ColorFilter colorFilter, int threadIndex) {
+        if (dstRectBackground[threadIndex] == null) {
+            dstRectBackground[threadIndex] = new RectF();
+            backgroundPaint[threadIndex] = new Paint();
+            backgroundPaint[threadIndex].setFilterBitmap(true);
+        }
+        backgroundPaint[threadIndex].setAlpha(alpha);
+        backgroundPaint[threadIndex].setColorFilter(colorFilter);
+        dstRectBackground[threadIndex].set(x, y, x + w, y + h);
+        drawInternal(canvas, true, 0, threadIndex);
+    }
+
+    private static final Xfermode SRC_XFERMODE = new PorterDuffXfermode(PorterDuff.Mode.SRC);
+
+    @AnyThread
+    public void drawInternal(Canvas canvas, boolean drawInBackground, long currentTime, int threadIndex) {
+        synchronized (frameLock) {
+            drawInternalLocked(canvas, drawInBackground, currentTime, threadIndex);
+        }
+    }
+    private void drawInternalLocked(Canvas canvas, boolean drawInBackground, long currentTime, int threadIndex) {
+        if (!canLoadFrames() || destroyWhenDone) {
+            return;
+        }
+
+        if (currentTime == 0) {
+            currentTime = System.currentTimeMillis();
+        }
+
+        final RectF rect = drawInBackground ? dstRectBackground[threadIndex] : dstRect;
+        final Paint paint = drawInBackground ? backgroundPaint[threadIndex] : getPaint();
+
+        if (!drawInBackground) {
+            updateCurrentFrame(currentTime, false);
+        }
+
+        if (renderingBuffer == null) {
+            return;
+        }
+        float loopProgress = 1f;
+        if (gifLoopBuffer != null) {
+            if (!isRunning || isPaused || pendingSeekToUI >= 0 || !renderingBuffer.opaque) {
+                clearGifLoopBlend();
+            } else {
+                loopProgress = Math.min(1f, Math.max(0f,
+                    (SystemClock.uptimeMillis() - gifLoopBlendStart) / (float) GIF_LOOP_BLEND_MS));
+                if (loopProgress >= 1f) {
+                    clearGifLoopBlend();
+                }
+            }
+        }
+
+        final boolean hasRoundRadius = hasRoundRadius();
+        if (!drawInBackground) {
+            final Xfermode xfermodeToSet = gifLoopBuffer == null && !hasRoundRadius && renderingBuffer.opaque && paint.getAlpha() == 255 ? SRC_XFERMODE : null;
+            if (paint.getXfermode() != xfermodeToSet) {
+                paint.setXfermode(xfermodeToSet);
+            }
+        }
+
+        float scaleX = this.scaleX;
+        float scaleY = this.scaleY;
+        if (drawInBackground) {
+            int bitmapW = renderingBuffer.width;
+            int bitmapH = renderingBuffer.height;
+            if (metaData[2] == 90 || metaData[2] == 270) {
+                int temp = bitmapW;
+                bitmapW = bitmapH;
+                bitmapH = temp;
+            }
+            scaleX = rect.width() / bitmapW;
+            scaleY = rect.height() / bitmapH;
+        } else if (applyTransformation) {
+            int bitmapW = renderingBuffer.width;
+            int bitmapH = renderingBuffer.height;
+            if (metaData[2] == 90 || metaData[2] == 270) {
+                int temp = bitmapW;
+                bitmapW = bitmapH;
+                bitmapH = temp;
+            }
+            rect.set(getBounds());
+            this.scaleX = scaleX = rect.width() / bitmapW;
+            this.scaleY = scaleY = rect.height() / bitmapH;
+            applyTransformation = false;
+        }
+        final int alpha = paint.getAlpha();
+        try {
+            if (gifLoopBuffer != null) {
+                final int incomingAlpha = Math.round(alpha * loopProgress);
+                final int outgoingAlpha = incomingAlpha == 255 ? 0
+                    : Math.round((alpha - incomingAlpha) / (1f - incomingAlpha / 255f));
+                paint.setAlpha(outgoingAlpha);
+                drawBuffer(canvas, gifLoopBuffer, rect, paint, scaleX, scaleY, drawInBackground, threadIndex, hasRoundRadius);
+                paint.setAlpha(incomingAlpha);
+            }
+            drawBuffer(canvas, renderingBuffer, rect, paint, scaleX, scaleY, drawInBackground, threadIndex, hasRoundRadius);
+        } finally {
+            paint.setAlpha(alpha);
+        }
+    }
+    private void drawBuffer(Canvas canvas, AnimatedFileBuffer buffer, RectF rect, Paint paint, float scaleX, float scaleY,
+                            boolean drawInBackground, int threadIndex, boolean hasRoundRadius) {
+        if (hasRoundRadius) {
+            int index = drawInBackground ? threadIndex + 1 : 0;
+            if (USE_BITMAP_SHADER) {
+                final Shader shader = buffer.getShader(index);
+                paint.setShader(shader);
+                Matrix matrix = shaderMatrix[index];
+                if (matrix == null) {
+                    matrix = shaderMatrix[index] = new Matrix();
+                }
+                matrix.reset();
+                matrix.setTranslate(rect.left, rect.top);
+                if (metaData[2] == 90) {
+                    matrix.preRotate(90);
+                    matrix.preTranslate(0, -rect.width());
+                } else if (metaData[2] == 180) {
+                    matrix.preRotate(180);
+                    matrix.preTranslate(-rect.width(), -rect.height());
+                } else if (metaData[2] == 270) {
+                    matrix.preRotate(270);
+                    matrix.preTranslate(-rect.height(), 0);
+                }
+                matrix.preScale(scaleX, scaleY);
+                shader.setLocalMatrix(matrix);
+            }
+
+            Path path = roundPath[index];
+            if (path == null) {
+                path = roundPath[index] = new Path();
+            }
+            if (invalidatePath || drawInBackground) {
+                if (!drawInBackground) {
+                    invalidatePath = false;
+                }
+                float[] radii = this.radii[index];
+                if (radii == null) {
+                    radii = this.radii[index] = new float[8];
+                }
+                for (int a = 0; a < roundRadius.length; a++) {
+                    radii[a * 2] = roundRadius[a];
+                    radii[a * 2 + 1] = roundRadius[a];
+                }
+                path.rewind();
+                path.addRoundRect(drawInBackground ? rect : actualDrawRect, radii, Path.Direction.CW);
+            }
+            if (USE_BITMAP_SHADER) {
+                if (isRoundRadiusSame()) {
+                    canvas.drawRoundRect(drawInBackground ? rect : actualDrawRect, roundRadius[0], roundRadius[0], paint);
+                } else {
+                    canvas.drawPath(path, paint);
+                }
+            } else {
+                canvas.save();
+                canvas.clipPath(path);
+                drawBitmap(buffer, rect, paint, canvas, scaleX, scaleY);
+                canvas.restore();
+            }
+        } else {
+            paint.setShader(null);
+            drawBitmap(buffer, rect, paint, canvas, scaleX, scaleY);
+        }
+    }
+
+    @AnyThread
+    private void drawBitmap(AnimatedFileBuffer buffer, RectF rect, Paint paint, Canvas canvas, float sx, float sy) {
+        canvas.save();
+        canvas.translate(rect.left, rect.top);
+        if (metaData[2] == 90) {
+            canvas.rotate(90);
+            canvas.translate(0, -rect.width());
+        } else if (metaData[2] == 180) {
+            canvas.rotate(180);
+            canvas.translate(-rect.width(), -rect.height());
+        } else if (metaData[2] == 270) {
+            canvas.rotate(270);
+            canvas.translate(-rect.height(), 0);
+        }
+        canvas.scale(sx, sy);
+        canvas.drawBitmap(buffer.bitmap, 0, 0, paint);
+        canvas.restore();
+    }
+
+    public long getLastFrameTimestamp() {
+        return lastTimeStamp;
+    }
+
+    @Override
+    public int getMinimumHeight() {
+        int height = decoderCreated ? (metaData[2] == 90 || metaData[2] == 270 ? metaData[0] : metaData[1]) : 0;
+        if (height == 0) {
+            return dp(100);
+        }
+        return height;
+    }
+
+    @Override
+    public int getMinimumWidth() {
+        int width = decoderCreated ? (metaData[2] == 90 || metaData[2] == 270 ? metaData[1] : metaData[0]) : 0;
+        if (width == 0) {
+            return dp(100);
+        }
+        return width;
+    }
+
+    public Bitmap getBackgroundBitmap() {
+        return backgroundBuffer != null && backgroundBuffer.hasFrame ? backgroundBuffer.bitmap : null;
+    }
+
+    public Bitmap getAnimatedBitmap() {
+        if (renderingBuffer != null) {
+            return renderingBuffer.bitmap;
+        } else if (nextRenderingBuffer != null) {
+            return nextRenderingBuffer.bitmap;
+        } else if (nextRenderingBuffer2 != null) {
+            return nextRenderingBuffer2.bitmap;
+        }
+        return null;
+    }
+
+    @UiThread
+    public boolean copyClosingFrame(Bitmap expected, Bitmap snapshot) {
+        synchronized (frameLock) {
+            if (isRunning || isRecycled || destroyWhenDone || renderingBuffer == null
+                    || renderingBuffer.bitmap != expected || expected == null || expected.isRecycled()
+                    || !expected.isMutable() || snapshot == null || snapshot.isRecycled()
+                    || snapshot.getWidth() != expected.getWidth() || snapshot.getHeight() != expected.getHeight()) {
+                return false;
+            }
+            try {
+                Paint paint = new Paint();
+                paint.setXfermode(SRC_XFERMODE);
+                new Canvas(expected).drawBitmap(snapshot, 0, 0, paint);
+                return true;
+            } catch (RuntimeException e) {
+                return false;
+            }
+        }
+    }
+    public void replaceAnimatedBitmap(Bitmap b) {
+        synchronized (frameLock) {
+            resetGifLoopBlend();
+            if (renderingBuffer != null) {
+                returnUnusedBuffer(renderingBuffer);
+            }
+            if (nextRenderingBuffer != null) {
+                returnUnusedBuffer(nextRenderingBuffer);
+            }
+            if (nextRenderingBuffer2 != null) {
+                returnUnusedBuffer(nextRenderingBuffer2);
+            }
+            renderingBuffer = AnimatedFileBuffer.of(b);
+            nextRenderingBuffer = null;
+            nextRenderingBuffer2 = null;
+        }
+    }
+
+    public void setActualDrawRect(float x, float y, float width, float height) {
+        float bottom = y + height;
+        float right = x + width;
+        if (actualDrawRect.left != x || actualDrawRect.top != y || actualDrawRect.right != right || actualDrawRect.bottom != bottom) {
+            actualDrawRect.set(x, y, right, bottom);
+            invalidatePath = true;
+        }
+    }
+
+    public void setRoundRadius(int[] value) {
+        if (!secondParentViews.isEmpty()) {
+            if (roundRadiusBackup == null) {
+                roundRadiusBackup = new int[4];
+            }
+            System.arraycopy(roundRadius, 0, roundRadiusBackup, 0, roundRadiusBackup.length);
+        }
+        for (int i = 0; i < 4; i++) {
+            if (!invalidatePath && value[i] != roundRadius[i]) {
+                invalidatePath = true;
+            }
+            roundRadius[i] = value[i];
+        }
+    }
+
+    private boolean hasRoundRadius() {
+        for (int radius : roundRadius) {
+            if (radius != 0) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean isRoundRadiusSame() {
+        return roundRadius[0] == roundRadius[1]
+            && roundRadius[1] == roundRadius[2]
+            && roundRadius[2] == roundRadius[3];
+    }
+
+
+    public boolean hasBitmap() {
+        return canLoadFrames() && (renderingBuffer != null || nextRenderingBuffer != null);
+    }
+    public boolean hasRenderingBitmap() {
+        synchronized (frameLock) {
+            return canLoadFrames() && !destroyWhenDone && renderingBuffer != null;
+        }
+    }
+
+    public int getOrientation() {
+        return metaData[2];
+    }
+
+    public AnimatedFileDrawable makeCopy() {
+        AnimatedFileDrawable drawable;
+        if (stream != null) {
+            drawable = new AnimatedFileDrawable(path, false, streamFileSize, streamLoadingPriority, stream.getDocument(), stream.getLocation(), stream.getParentObject(), pendingSeekToUI, currentAccount, stream != null && stream.isPreview(), null);
+        } else {
+            drawable = new AnimatedFileDrawable(path, false, streamFileSize, streamLoadingPriority, document, null, null, pendingSeekToUI, currentAccount, false, null);
+        }
+        drawable.metaData[0] = metaData[0];
+        drawable.metaData[1] = metaData[1];
+        drawable.gifLoopBlendEnabled = gifLoopBlendEnabled && !isWebmSticker;
+        return drawable;
+    }
+
+    public void setStartEndTime(long startTime, long endTime) {
+        float newStartTime = startTime / 1000f;
+        float newEndTime = endTime / 1000f;
+        if (this.startTime != newStartTime || this.endTime != newEndTime) {
+            resetGifLoopBlend();
+        }
+        this.startTime = newStartTime;
+        this.endTime = newEndTime;
+        if (startTime >= 0 && getCurrentProgressMs() < startTime) {
+            seekTo(startTime, true);
+        }
+    }
+
+    public long getStartTime() {
+        return (long) (startTime * 1000);
+    }
+
+    public boolean isRecycled() {
+        return isRecycled || decoderTryCount >= MAX_TRIES;
+    }
+
+    public boolean decoderFailed() {
+        return decoderCreated && ptrFail;
+    }
+
+    @AnyThread
+    public Bitmap getNextFrame(boolean loop) {
+        resetGifLoopBlend();
+        if (mDecoder == null) {
+            return backgroundBuffer != null && backgroundBuffer.hasFrame ? backgroundBuffer.bitmap : null;
+        }
+        if (backgroundBuffer == null) {
+            backgroundBuffer = takeUnusedBuffer();
+            if (backgroundBuffer == null) {
+                backgroundBuffer = AnimatedFileBuffer.of((int) (metaData[0] * scaleFactor), (int) (metaData[1] * scaleFactor));
+            }
+        }
+        backgroundBuffer.hasFrame = false;
+        if (mDecoder.getVideoFrame(backgroundBuffer.bitmap, false, startTime, endTime, loop) != 0) {
+            backgroundBuffer.time = metaData[3];
+            backgroundBuffer.opaque = mDecoder.isLastFrameOpaque();
+            backgroundBuffer.hasFrame = true;
+        }
+        return backgroundBuffer.hasFrame ? backgroundBuffer.bitmap : null;
+    }
+
+    public void skipNextFrame(boolean loop) {
+        resetGifLoopBlend();
+        if (mDecoder == null) {
+            return;
+        }
+        mDecoder.getVideoFrame(null, false, startTime, endTime, loop);
+    }
+
+    public boolean hasParents() {
+        return !parents.isEmpty();
+    }
+
+    public File getFilePath() {
+        return path;
+    }
+
+    long cacheGenerateTimestamp;
+    Bitmap generatingCacheBitmap;
+    AnimatedFileNative cacheGenerateDecoder;
+    int tryCount;
+    int lastMetadata;
+
+    @Override
+    @AnyThread
+    public void prepareForGenerateCache() {
+        cacheGenerateDecoder = AnimatedFileNative.createDecoderFrom(path.getAbsolutePath(), metaData, currentAccount, streamFileSize, stream, false);
+    }
+
+    @Override
+    @AnyThread
+    public void releaseForGenerateCache() {
+        if (cacheGenerateDecoder != null) {
+            cacheGenerateDecoder.recycle();
+            cacheGenerateDecoder = null;
+        }
+    }
+
+    @Override
+    @AnyThread
+    public int getNextFrame(Bitmap bitmap) {
+        if (cacheGenerateDecoder == null) {
+            return -1;
+        }
+        Canvas canvas = new Canvas(bitmap);
+        if (generatingCacheBitmap == null) {
+            generatingCacheBitmap = Bitmap.createBitmap(metaData[0], metaData[1], Bitmap.Config.ARGB_8888);
+        }
+        if (cacheGenerateDecoder.getVideoFrame(generatingCacheBitmap, false, startTime, endTime, this.loop) == 0) {
+            return 0;
+        }
+        if (cacheGenerateTimestamp != 0 && (metaData[3] == 0 || cacheGenerateTimestamp > metaData[3])) {
+            return 0;
+        }
+        if (lastMetadata == metaData[3]) {
+            tryCount++;
+            if (tryCount > 5) {
+                return 0;
+            }
+        }
+        lastMetadata = metaData[3];
+        bitmap.eraseColor(Color.TRANSPARENT);
+        canvas.save();
+        float s = (float) renderingWidth / generatingCacheBitmap.getWidth();
+        canvas.scale(s, s);
+        canvas.drawBitmap(generatingCacheBitmap, 0, 0, null);
+        canvas.restore();
+        cacheGenerateTimestamp = metaData[3];
+        return 1;
+    }
+
+    @AnyThread
+    public Bitmap getFirstFrame(Bitmap bitmap) {
+        if (bitmap == null) {
+            bitmap = Bitmap.createBitmap(renderingWidth, renderingHeight, Bitmap.Config.ARGB_8888);
+        }
+        Canvas canvas = new Canvas(bitmap);
+
+        AnimatedFileNative tempDecoder = AnimatedFileNative.createDecoderFrom(path.getAbsolutePath(), metaData, currentAccount, streamFileSize, stream, false);
+        if (tempDecoder == null) {
+            return bitmap;
+        }
+        if (generatingCacheBitmap == null) {
+            generatingCacheBitmap = Bitmap.createBitmap(Math.max(1, metaData[0]), Math.max(1, metaData[1]), Bitmap.Config.ARGB_8888);
+        }
+        tempDecoder.getVideoFrame(generatingCacheBitmap, false, startTime, endTime, true);
+        tempDecoder.recycle();
+        bitmap.eraseColor(Color.TRANSPARENT);
+        canvas.save();
+        float s = (float) renderingWidth / generatingCacheBitmap.getWidth();
+        canvas.scale(s, s);
+        canvas.drawBitmap(generatingCacheBitmap, 0, 0, null);
+        canvas.restore();
+
+        return bitmap;
+    }
+
+    private boolean canLoadFrames() {
+        if (precache) {
+            return bitmapsCache != null;
+        } else {
+            return mDecoder != null || !decoderCreated;
+        }
+    }
+
+    @UiThread
+    public void updateCurrentFrame(long now, boolean b) {
+        synchronized (frameLock) {
+            checkChoreographerAfterDrawCall();
+            updateCurrentFrameInternal(now, b);
+        }
+    }
+
+    @UiThread
+    private void updateCurrentFrameInternal(long now, boolean updateInBackground) {
+        final boolean canSwapBuffers = swapBuffersAllowedByChoreographer
+            || !isRunning && decodeSingleFrame;
+
+        if (isRunning) {
+            if (renderingBuffer == null && nextRenderingBuffer == null) {
+                scheduleNextGetFrame();
+            } else if (nextRenderingBuffer != null && (renderingBuffer == null || (canSwapBuffers && !skipFrameUpdate && pendingSeekToUI < 0))) {
+                swapBuffers(now);
+                scheduleNextGetFrame();
+            }
+        } else if (!isRunning && decodeSingleFrame && canSwapBuffers && !skipFrameUpdate && nextRenderingBuffer != null) {
+            swapBuffers(now);
+            scheduleNextGetFrame();
+        }
+    }
+
+    @UiThread
+    private void swapBuffers(long now) {
+        if (gifLoopBlendEnabled && !isWebmSticker && isRunning && !isPaused && !skipFrameUpdate
+                && startTime <= 0 && endTime <= 0 && pendingSeekTo < 0 && pendingSeekToUI < 0
+                && renderingBuffer != null && nextRenderingBuffer != null && nextRenderingBuffer.startsGifLoop
+                && renderingBuffer.gifPlaybackGeneration == gifPlaybackGeneration
+                && nextRenderingBuffer.gifPlaybackGeneration == gifPlaybackGeneration
+                && renderingBuffer.time > nextRenderingBuffer.time && renderingBuffer.opaque && nextRenderingBuffer.opaque
+                && renderingBuffer.width == nextRenderingBuffer.width && renderingBuffer.height == nextRenderingBuffer.height) {
+            clearGifLoopBlend();
+            gifLoopBuffer = renderingBuffer;
+            gifLoopBlendStart = SystemClock.uptimeMillis();
+            AndroidUtilities.runOnUIThread(gifLoopInvalidate, 16);
+        } else if (renderingBuffer != null) {
+            returnUnusedBuffer(renderingBuffer);
+        }
+        renderingBuffer = nextRenderingBuffer;
+        nextRenderingBuffer = nextRenderingBuffer2;
+        nextRenderingBuffer2 = null;
+        lastFrameTime = now;
+        swapBuffersAllowedByChoreographer = false;
+    }
+    private AnimatedFileBuffer takeUnusedBuffer() {
+        synchronized (unusedBuffers) {
+            AnimatedFileBuffer buffer = unusedBuffers.isEmpty() ? null : unusedBuffers.remove(0);
+            if (buffer != null) {
+                buffer.hasFrame = false;
+            }
+            return buffer;
+        }
+    }
+    private void returnUnusedBuffer(AnimatedFileBuffer buffer) {
+        synchronized (unusedBuffers) {
+            unusedBuffers.add(buffer);
+        }
+    }
+    private void clearGifLoopBlend() {
+        if (gifLoopBuffer != null) {
+            returnUnusedBuffer(gifLoopBuffer);
+            gifLoopBuffer = null;
+        }
+        AndroidUtilities.cancelRunOnUIThread(gifLoopInvalidate);
+    }
+    private void resetGifLoopBlend() {
+        if (!gifLoopBlendEnabled || isWebmSticker) {
+            return;
+        }
+        synchronized (frameLock) {
+            gifPlaybackGeneration++;
+            clearGifLoopBlend();
+        }
+    }
+    @UiThread
+    private void invalidateGifLoop() {
+        synchronized (frameLock) {
+            if (gifLoopBuffer == null) {
+                return;
+            }
+            if (!isRunning || isPaused || isRecycled || skipFrameUpdate || pendingSeekToUI >= 0
+                    || SystemClock.uptimeMillis() - gifLoopBlendStart >= GIF_LOOP_BLEND_MS) {
+                clearGifLoopBlend();
+            } else {
+                AndroidUtilities.runOnUIThread(gifLoopInvalidate,
+                    Math.min(16, GIF_LOOP_BLEND_MS - (SystemClock.uptimeMillis() - gifLoopBlendStart)));
+            }
+        }
+        invalidateInternal();
+        uiStartTaskImpl();
+    }
+
+    public int getFps() {
+        return metaData[5];
+    }
+
+    public int estimateSizeInCache() {
+        final int intrinsicSize = getIntrinsicWidth() * getIntrinsicHeight();
+        final int renderingSize = renderingWidth * renderingHeight;
+        return Math.max(intrinsicSize, renderingSize) * 4 * (gifLoopBlendEnabled && !isWebmSticker ? 4 : 3);
+    }
+
+
+    private static final int PAUSE_AFTER_TICKS = 10;
+    private int ticksWithoutDraw;
+    private volatile boolean isPaused;
+
+    @UiThread
+    private void checkChoreographerAfterFrameCall() {
+        ticksWithoutDraw++;
+        if (ticksWithoutDraw > PAUSE_AFTER_TICKS) {
+            isPaused = true;
+            resetGifLoopBlend();
+        }
+        checkChoreographerInternal();
+    }
+
+    @UiThread
+    private void checkChoreographerAfterDrawCall() {
+        ticksWithoutDraw = 0;
+        if (isPaused) {
+            isPaused = false;
+            checkChoreographer();
+        }
+    }
+
+    private final Choreographer60FpsContent.FrameCallback mUiThreadChoreographerCallback = this::onChoreographerFrame;
+    private boolean swapBuffersAllowedByChoreographer;
+
+    @UiThread
+    private void onChoreographerFrame(long frameTimeNanos) {
+        checkChoreographerAfterFrameCall();
+        if (isChoreographerRegistered) {
+            swapBuffersAllowedByChoreographer = true;
+            invalidateInternal();
+        }
+    }
+
+    @AnyThread
+    private void checkChoreographer() {
+        AndroidUtilities.executeOnUIThread(this::checkChoreographerInternal);
+    }
+
+    private static int activeChoreographersCount;
+    private boolean isChoreographerRegistered;
+
+    @UiThread
+    private void checkChoreographerInternal() {
+        if (isRunning && !isPaused && !isStaticVideoDetected) {
+            if (!isChoreographerRegistered) {
+                final int fps = metaData[5];
+                if (fps <= 0) {
+                    return;
+                }
+                activeChoreographersCount++;
+                isChoreographerRegistered = true;
+                ticksWithoutDraw = 0;
+                Choreographer60FpsContent.getInstance().addFrameCallback(mUiThreadChoreographerCallback, fps);
+            }
+        } else {
+            if (isChoreographerRegistered) {
+                activeChoreographersCount--;
+                isChoreographerRegistered = false;
+                ticksWithoutDraw = 0;
+                Choreographer60FpsContent.getInstance().removeFrameCallback(mUiThreadChoreographerCallback);
+            }
+        }
+    }
+}

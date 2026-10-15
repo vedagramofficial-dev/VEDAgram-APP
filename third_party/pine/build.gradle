@@ -1,0 +1,84 @@
+// Top-level build file where you can add configuration options common to all sub-projects/modules.
+
+// Load local.properties into gradle
+def localProperties = new Properties()
+def ins = rootProject.file('local.properties').newDataInputStream()
+localProperties.load(ins)
+ins.close()
+
+buildscript {
+    repositories {
+		mavenLocal()
+        google()
+        mavenCentral()
+    }
+    dependencies {
+        classpath 'com.android.tools.build:gradle:8.2.0'
+        
+        // NOTE: Do not place your application dependencies here; they belong
+        // in the individual module build.gradle files
+    }
+}
+
+allprojects {
+    localProperties.forEach { key, value -> setProperty(key, value) }
+
+    repositories {
+		mavenLocal()
+        google()
+        mavenCentral()
+    }
+
+    task publishAarToSonatype(type: GradleBuild) {
+        tasks = [
+                'build',
+                'publishMavenJavaPublicationToOssrhRepository'
+        ]
+    }
+}
+
+ext {
+    compileSdk = 34
+    minSdk = 19
+    targetSdk = 34
+    ndkVersion = "25.2.9519653"
+    cmakeVersion = "3.22.1"
+    userOrg = 'canyie'
+    groupId = 'top.canyie.pine'
+    repoName = 'pine'
+    website = "https://github.com/canyie/pine"
+}
+
+ext.uploadRepositories = {
+    maven {
+        name 'ossrh'
+        url 'https://s01.oss.sonatype.org/service/local/staging/deploy/maven2/'
+        credentials {
+            username localProperties['sonatypeTokenUsername']
+            password localProperties['sonatypeToken']
+        }
+    }
+}
+
+ext.licenses = {
+    license {
+        name = 'Anti 996 License Version 1.0'
+        url = 'https://github.com/996icu/996.ICU/blob/master/LICENSE'
+    }
+}
+
+ext.scm = {
+    connection = 'scm:git:https://github.com/canyie/pine.git'
+    url = 'https://github.com/canyie/pine'
+}
+
+ext.developers = {
+    developer {
+        name = 'canyie'
+        url = 'https://github.com/canyie'
+    }
+}
+
+task clean(type: Delete) {
+    delete rootProject.buildDir
+}

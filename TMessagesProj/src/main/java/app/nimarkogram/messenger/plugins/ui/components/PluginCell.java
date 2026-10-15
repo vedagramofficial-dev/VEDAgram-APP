@@ -1,0 +1,724 @@
+/* Modifications Copyright (C) 2026 Ettacent */
+
+package app.nimarkogram.messenger.plugins.ui.components;
+import android.content.res.ColorStateList;
+import android.text.Layout;
+import android.text.Spanned;
+import android.text.style.URLSpan;
+import java.util.List;
+import android.animation.Animator;
+import android.animation.AnimatorListenerAdapter;
+import android.animation.ValueAnimator;
+
+import android.annotation.SuppressLint;
+import android.content.Context;
+import android.graphics.Canvas;
+import android.graphics.Path;
+import android.graphics.PorterDuff;
+import android.graphics.PorterDuffColorFilter;
+import android.graphics.RectF;
+import android.graphics.drawable.Drawable;
+import android.os.Build;
+import android.text.SpannableStringBuilder;
+import android.text.TextUtils;
+import android.view.Gravity;
+import android.view.View;
+import android.view.ViewGroup;
+import android.widget.FrameLayout;
+import android.widget.ImageView;
+import android.widget.LinearLayout;
+import android.widget.ProgressBar;
+import android.widget.TextView;
+
+import androidx.appcompat.widget.AppCompatImageView;
+import androidx.core.content.ContextCompat;
+
+import org.telegram.messenger.AndroidUtilities;
+import org.telegram.messenger.ImageLocation;
+import org.telegram.messenger.LocaleController;
+import org.telegram.messenger.MediaDataController;
+import org.telegram.messenger.NotificationCenter;
+import org.telegram.messenger.R;
+import org.telegram.messenger.SharedConfig;
+import org.telegram.messenger.UserConfig;
+import org.telegram.ui.ActionBar.Theme;
+import org.telegram.ui.Components.BackupImageView;
+import org.telegram.ui.Components.CubicBezierInterpolator;
+import org.telegram.ui.Components.EffectsTextView;
+import org.telegram.ui.Components.LayoutHelper;
+import org.telegram.ui.Components.Switch;
+import org.telegram.ui.Components.UItem;
+import org.telegram.ui.Components.UniversalAdapter;
+import org.telegram.ui.Components.UniversalRecyclerView;
+import org.telegram.ui.LaunchActivity;
+
+import java.io.PrintWriter;
+import java.io.StringWriter;
+
+import app.nimarkogram.messenger.NimarkoConfig;
+import app.nimarkogram.messenger.plugins.Plugin;
+import app.nimarkogram.messenger.plugins.PluginsController;
+import app.nimarkogram.messenger.plugins.utils.PluginCrashReports;
+import app.nimarkogram.messenger.utils.NimarkoUiAnimationClock;
+import app.nimarkogram.messenger.utils.text.LocaleUtils;
+
+@SuppressLint({"ViewConstructor"})
+public class PluginCell extends FrameLayout implements NotificationCenter.NotificationCenterDelegate {
+    public static final long NO_UI_OPERATION_EPOCH = 0L;
+
+    private final Switch checkBox;
+    private final EffectsTextView descriptionView;
+    private final FrameLayout islandView;
+    private final LinearLayout rowLayout;
+    private final BackupImageView imageView;
+    private final ImageView placeholderIcon;
+    private final ImageView kebabButton;
+    
+    private final ProgressBar loadingSpinner;
+    private final FrameLayout trailingSlot;
+    private boolean loading;
+    private float loadingProgress;
+    private ValueAnimator loadingAnimator;
+    private Runnable loadingReveal;
+    private Plugin plugin;
+    private PluginCellDelegate pluginCellDelegate;
+    private final TextView pluginNameView;
+    private final EffectsTextView subtitleView;
+    private final TextView requirementsView;
+    private boolean compact;
+    private boolean showingSavedReport;
+    private long bindingEpoch;
+
+    public PluginCell(Context context) {
+        this(context, null);
+    }
+
+    public PluginCell(Context context, Theme.ResourcesProvider resourcesProvider) {
+        super(context);
+
+        setClickable(false);
+        setClipChildren(false);
+        setClipToPadding(false);
+
+        islandView = new FrameLayout(context);
+        islandView.setBackground(Theme.createRoundRectDrawable(
+                AndroidUtilities.dp(16.0f),
+                Theme.getColor(Theme.key_windowBackgroundWhite)));
+        addView(islandView, LayoutHelper.createFrame(-1, -2.0f, 0, 12.0f, 4.0f, 12.0f, 4.0f));
+
+        LinearLayout islandStack = new LinearLayout(context);
+        islandStack.setOrientation(LinearLayout.VERTICAL);
+        islandView.addView(islandStack, LayoutHelper.createFrame(-1, -2.0f));
+
+        rowLayout = new LinearLayout(context);
+        rowLayout.setOrientation(LinearLayout.HORIZONTAL);
+        rowLayout.setGravity(Gravity.CENTER_VERTICAL);
+        rowLayout.setMinimumHeight(AndroidUtilities.dp(64));
+        rowLayout.setPadding(AndroidUtilities.dp(14), AndroidUtilities.dp(8),
+                AndroidUtilities.dp(12), AndroidUtilities.dp(8));
+        
+        rowLayout.setClipChildren(false);
+        rowLayout.setClipToPadding(false);
+        islandStack.addView(rowLayout, LayoutHelper.createLinear(-1, -2));
+
+        FrameLayout iconFrame = new FrameLayout(context);
+        rowLayout.addView(iconFrame, LayoutHelper.createLinear(40, 40, Gravity.CENTER_VERTICAL,
+                0, 0, 14, 0));
+
+        placeholderIcon = new AppCompatImageView(context);
+        placeholderIcon.setScaleType(ImageView.ScaleType.CENTER_INSIDE);
+        placeholderIcon.setImageDrawable(ContextCompat.getDrawable(context, R.drawable.menu_intro));
+        placeholderIcon.setColorFilter(new PorterDuffColorFilter(
+                Theme.getColor(Theme.key_windowBackgroundWhiteGrayIcon), PorterDuff.Mode.MULTIPLY));
+        placeholderIcon.setBackground(Theme.createCircleDrawable(AndroidUtilities.dp(40),
+                Theme.multAlpha(Theme.getColor(Theme.key_windowBackgroundWhiteGrayText), 0.12f)));
+        iconFrame.addView(placeholderIcon, LayoutHelper.createFrame(40, 40, Gravity.CENTER));
+
+        imageView = new BackupImageView(context) {
+            @Override
+            @SuppressLint({"DrawAllocation"})
+            public void onDraw(Canvas canvas) {
+                Path path = new Path();
+                float r = AndroidUtilities.dp(20.0f);
+                path.addRoundRect(new RectF(0.0f, 0.0f, getWidth(), getHeight()), r, r, Path.Direction.CW);
+                int save = canvas.save();
+                try {
+                    canvas.clipPath(path);
+                    super.onDraw(canvas);
+                } finally {
+                    canvas.restoreToCount(save);
+                }
+            }
+        };
+        imageView.setRoundRadius(AndroidUtilities.dp(20.0f));
+        
+        imageView.getImageReceiver().setAutoRepeat(2);
+        imageView.getImageReceiver().setAutoRepeatCount(-1);
+        imageView.setVisibility(View.GONE);
+        iconFrame.addView(imageView, LayoutHelper.createFrame(40, 40, Gravity.CENTER));
+
+        LinearLayout textColumn = new LinearLayout(context);
+        textColumn.setOrientation(LinearLayout.VERTICAL);
+        textColumn.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout.LayoutParams textColumnLp = new LinearLayout.LayoutParams(0,
+                ViewGroup.LayoutParams.WRAP_CONTENT, 1.0f);
+        textColumnLp.gravity = Gravity.CENTER_VERTICAL;
+        rowLayout.addView(textColumn, textColumnLp);
+
+        pluginNameView = new TextView(context);
+        pluginNameView.setGravity(Gravity.START | Gravity.CENTER_VERTICAL);
+        pluginNameView.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText));
+        pluginNameView.setTextSize(1, 16.0f);
+        pluginNameView.setTypeface(AndroidUtilities.bold());
+        pluginNameView.setEllipsize(TextUtils.TruncateAt.END);
+        pluginNameView.setSingleLine(true);
+        textColumn.addView(pluginNameView, LayoutHelper.createLinear(-1, -2));
+
+        subtitleView = new EffectsTextView(context);
+        subtitleView.setGravity(Gravity.START | Gravity.CENTER_VERTICAL);
+        subtitleView.setTypeface(AndroidUtilities.getTypeface(AndroidUtilities.TYPEFACE_ROBOTO_REGULAR));
+        subtitleView.setMovementMethod(new AndroidUtilities.LinkMovementMethodMy());
+        subtitleView.setLinkTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteLinkText));
+        subtitleView.setTextSize(1, 13.0f);
+        subtitleView.setEllipsize(TextUtils.TruncateAt.END);
+        subtitleView.setSingleLine(true);
+        subtitleView.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteGrayText));
+        textColumn.addView(subtitleView, LayoutHelper.createLinear(-1, -2, 0.0f, 2.0f, 0.0f, 0.0f));
+
+        requirementsView = new TextView(context);
+        requirementsView.setGravity(Gravity.START | Gravity.CENTER_VERTICAL);
+        requirementsView.setTypeface(AndroidUtilities.getTypeface(AndroidUtilities.TYPEFACE_ROBOTO_REGULAR));
+        requirementsView.setTextSize(1, 12.0f);
+        requirementsView.setEllipsize(TextUtils.TruncateAt.END);
+        requirementsView.setSingleLine(true);
+        requirementsView.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteValueText));
+        requirementsView.setVisibility(View.GONE);
+        textColumn.addView(requirementsView, LayoutHelper.createLinear(-1, -2, 0.0f, 2.0f, 0.0f, 0.0f));
+
+        descriptionView = new EffectsTextView(context);
+        descriptionView.setGravity(Gravity.START | Gravity.CENTER_VERTICAL);
+        descriptionView.setTypeface(AndroidUtilities.getTypeface(AndroidUtilities.TYPEFACE_ROBOTO_REGULAR));
+        descriptionView.setMovementMethod(new AndroidUtilities.LinkMovementMethodMy());
+        descriptionView.setLinkTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteLinkText));
+        descriptionView.setTextSize(1, 13.0f);
+        descriptionView.setVisibility(View.GONE);
+        descriptionView.setPadding(AndroidUtilities.dp(14), 0, AndroidUtilities.dp(12),
+                AndroidUtilities.dp(8));
+        islandStack.addView(descriptionView, LayoutHelper.createLinear(-1, -2));
+
+        FrameLayout actionsFrame = new FrameLayout(context);
+        rowLayout.addView(actionsFrame, LayoutHelper.createLinear(84, 40, Gravity.CENTER_VERTICAL));
+
+        kebabButton = new AppCompatImageView(context);
+        kebabButton.setScaleType(ImageView.ScaleType.CENTER);
+        kebabButton.setImageDrawable(ContextCompat.getDrawable(context, R.drawable.ic_ab_other).mutate());
+        kebabButton.setColorFilter(new PorterDuffColorFilter(
+                Theme.getColor(Theme.key_windowBackgroundWhiteGrayIcon), PorterDuff.Mode.MULTIPLY));
+        kebabButton.setBackground(Theme.createSelectorDrawable(
+                Theme.getColor(Theme.key_dialogButtonSelector), 1, AndroidUtilities.dp(18.0f)));
+        kebabButton.setContentDescription(LocaleController.getString(R.string.AccDescrMoreOptions));
+        kebabButton.setOnClickListener(this::onKebabClicked);
+        actionsFrame.addView(kebabButton, LayoutHelper.createFrame(40, 40,
+                Gravity.START | Gravity.CENTER_VERTICAL));
+
+        trailingSlot = new FrameLayout(context);
+        actionsFrame.addView(trailingSlot, LayoutHelper.createFrame(39, 40,
+                Gravity.END | Gravity.CENTER_VERTICAL));
+
+        checkBox = new Switch(context, resourcesProvider);
+        int trackKey = Theme.key_switchTrack;
+        int trackCheckedKey = Theme.key_switchTrackChecked;
+        int thumbKey = Theme.key_windowBackgroundWhite;
+        checkBox.setColors(trackKey, trackCheckedKey, thumbKey, thumbKey);
+        checkBox.setFocusable(true);
+        checkBox.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_YES);
+        trailingSlot.addView(checkBox, LayoutHelper.createFrame(39, 40, Gravity.CENTER));
+
+        loadingSpinner = new ProgressBar(context);
+        loadingSpinner.setIndeterminate(true);
+        loadingSpinner.setIndeterminateTintList(ColorStateList.valueOf(
+                Theme.getColor(Theme.key_switchTrackChecked)));
+        loadingSpinner.setVisibility(View.GONE);
+        loadingSpinner.setAlpha(0f);
+        loadingSpinner.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_YES);
+        loadingSpinner.setBackground(Theme.createCircleDrawable(AndroidUtilities.dp(16),
+                Theme.getColor(Theme.key_windowBackgroundWhite)));
+        loadingSpinner.setPadding(AndroidUtilities.dp(2), AndroidUtilities.dp(2),
+                AndroidUtilities.dp(2), AndroidUtilities.dp(2));
+        iconFrame.addView(loadingSpinner, LayoutHelper.createFrame(16, 16, Gravity.END | Gravity.BOTTOM));
+    }
+
+    public void setLoading(boolean loading) {
+        setLoading(loading, true);
+    }
+    private boolean canAnimateLoading() {
+        return isAttachedToWindow() && (isShown() || getParent() == null)
+                && getWindowVisibility() == View.VISIBLE
+                && SharedConfig.animationsEnabled()
+                && (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
+                ? ValueAnimator.areAnimatorsEnabled() : AndroidUtilities.getAnimatorDurationScale() > 0);
+    }
+    private void setLoading(boolean loading, boolean animated) {
+        final boolean changed = this.loading != loading;
+        this.loading = loading;
+        checkBox.setEnabled(!loading);
+        checkBox.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_YES);
+        loadingSpinner.setImportantForAccessibility(loading
+                ? View.IMPORTANT_FOR_ACCESSIBILITY_YES : View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        if (plugin != null) {
+            loadingSpinner.setContentDescription(plugin.getName() + ", "
+                    + LocaleController.getString(R.string.Loading));
+        }
+        final float target = loading ? 1f : 0f;
+        if (!animated || !canAnimateLoading()) {
+            cancelLoadingReveal();
+            cancelLoadingAnimator();
+            applyLoadingProgress(target);
+            return;
+        }
+        if (!changed && (loadingAnimator != null || loadingReveal != null)) {
+            return;
+        }
+        cancelLoadingReveal();
+        cancelLoadingAnimator();
+        if (loadingProgress == target) {
+            applyLoadingProgress(target);
+            return;
+        }
+        if (loading && loadingProgress == 0f) {
+            loadingReveal = new Runnable() {
+                @Override
+                public void run() {
+                    if (loadingReveal != this) {
+                        return;
+                    }
+                    loadingReveal = null;
+                    if (PluginCell.this.loading) {
+                        if (canAnimateLoading()) {
+                            animateLoadingProgress(1f);
+                        } else {
+                            applyLoadingProgress(1f);
+                        }
+                    }
+                }
+            };
+            postDelayed(loadingReveal, 120);
+            return;
+        }
+        animateLoadingProgress(target);
+    }
+
+    private void animateLoadingProgress(float target) {
+        final ValueAnimator animator = ValueAnimator.ofFloat(loadingProgress, target);
+        loadingAnimator = animator;
+        animator.setDuration(180);
+        animator.setInterpolator(CubicBezierInterpolator.EASE_OUT);
+        animator.addUpdateListener(animation -> {
+            if (loadingAnimator == animator) {
+                applyLoadingProgress((float) animation.getAnimatedValue());
+            }
+        });
+        animator.addListener(new AnimatorListenerAdapter() {
+            @Override
+            public void onAnimationEnd(Animator animation) {
+                if (loadingAnimator == animator) {
+                    loadingAnimator = null;
+                    applyLoadingProgress(target);
+                }
+            }
+        });
+        animator.start();
+        NimarkoUiAnimationClock.track(animator);
+    }
+
+    private void cancelLoadingReveal() {
+        if (loadingReveal != null) {
+            removeCallbacks(loadingReveal);
+            loadingReveal = null;
+        }
+    }
+    private void cancelLoadingAnimator() {
+        final ValueAnimator animator = loadingAnimator;
+        loadingAnimator = null;
+        if (animator != null) {
+            animator.cancel();
+        }
+    }
+    private void applyLoadingProgress(float progress) {
+        loadingProgress = progress;
+        loadingSpinner.setAlpha(progress);
+        checkBox.setAlpha(1f);
+        loadingSpinner.setVisibility(progress > 0f ? View.VISIBLE : View.GONE);
+        checkBox.setVisibility(View.VISIBLE);
+    }
+
+    public boolean isLoading() {
+        return loading;
+    }
+
+    private void onKebabClicked(View view) {
+        if (pluginCellDelegate != null) {
+            pluginCellDelegate.showKebabMenu(view);
+        }
+    }
+
+    public boolean isPointOnInteractive(float x, float y) {
+        if (descriptionView.getVisibility() == View.VISIBLE
+                && isInsideViewRelativeToSelf(descriptionView, x, y, false)) {
+            return true;
+        }
+        if (isInsideViewRelativeToSelf(kebabButton, x, y)) {
+            return true;
+        }
+        
+        if (isInsideViewRelativeToSelf(trailingSlot, x, y)) {
+            return true;
+        }
+        
+        if (subtitleView != null && subtitleView.getVisibility() == View.VISIBLE
+                && isPointOnUrlSpan(subtitleView, x, y)) {
+            return true;
+        }
+        return checkBox != null && checkBox.getVisibility() == View.VISIBLE
+                && isInsideViewRelativeToSelf(checkBox, x, y);
+    }
+
+    private boolean isPointOnUrlSpan(TextView text, float x, float y) {
+        if (text == null || text.getVisibility() != View.VISIBLE) {
+            return false;
+        }
+        float left = 0f, top = 0f;
+        View walker = text;
+        while (walker != null && walker != this) {
+            left += walker.getX();
+            top += walker.getY();
+            if (walker.getParent() instanceof View) {
+                walker = (View) walker.getParent();
+            } else {
+                walker = null;
+            }
+        }
+        float localX = x - left - text.getPaddingLeft();
+        float localY = y - top - text.getPaddingTop();
+        if (localX < 0 || localY < 0
+                || localX > text.getWidth() - text.getPaddingLeft() - text.getPaddingRight()
+                || localY > text.getHeight() - text.getPaddingTop() - text.getPaddingBottom()) {
+            return false;
+        }
+        Layout layout = text.getLayout();
+        CharSequence cs = text.getText();
+        if (layout == null || !(cs instanceof Spanned)) {
+            return false;
+        }
+        int line = layout.getLineForVertical((int) localY);
+        int offset = layout.getOffsetForHorizontal(line, localX);
+        
+        if (localX > layout.getLineRight(line) || localX < layout.getLineLeft(line)) {
+            return false;
+        }
+        URLSpan[] spans = ((Spanned) cs)
+                .getSpans(offset, offset, URLSpan.class);
+        return spans != null && spans.length > 0;
+    }
+
+    private boolean isInsideViewRelativeToSelf(View child, float x, float y) {
+        return isInsideViewRelativeToSelf(child, x, y, true);
+    }
+
+    private boolean isInsideViewRelativeToSelf(View child, float x, float y, boolean fullHeight) {
+        if (child == null || child.getVisibility() != View.VISIBLE) {
+            return false;
+        }
+        
+        float left = 0f;
+        float top = 0f;
+        View walker = child;
+        while (walker != null && walker != this) {
+            left += walker.getX();
+            top += walker.getY();
+            if (walker.getParent() instanceof View) {
+                walker = (View) walker.getParent();
+            } else {
+                walker = null;
+            }
+        }
+        float right = left + child.getWidth();
+        
+        float slop = fullHeight ? AndroidUtilities.dp(8) : 0;
+        return x >= left - slop && x <= right + slop
+                && (fullHeight ? y >= 0 && y <= getHeight()
+                : y >= top && y <= top + child.getHeight());
+    }
+
+    public void setCompact(boolean z) {
+        this.compact = z;
+        
+        rowLayout.setMinimumHeight(AndroidUtilities.dp(z ? 48 : 64));
+        int vPad = AndroidUtilities.dp(z ? 4 : 8);
+        rowLayout.setPadding(AndroidUtilities.dp(14), vPad,
+                AndroidUtilities.dp(12), vPad);
+        
+        ViewGroup.LayoutParams iconLp = imageView.getLayoutParams();
+        int iconSize = AndroidUtilities.dp(z ? 28 : 40);
+        if (iconLp != null) {
+            iconLp.width = iconSize;
+            iconLp.height = iconSize;
+            imageView.setLayoutParams(iconLp);
+        }
+        ViewGroup.LayoutParams placeholderLp = placeholderIcon.getLayoutParams();
+        if (placeholderLp != null) {
+            placeholderLp.width = iconSize;
+            placeholderLp.height = iconSize;
+            placeholderIcon.setLayoutParams(placeholderLp);
+        }
+        if (placeholderIcon.getParent() instanceof View) {
+            ViewGroup.LayoutParams frameLp = ((View) placeholderIcon.getParent()).getLayoutParams();
+            if (frameLp instanceof LinearLayout.LayoutParams) {
+                frameLp.width = iconSize;
+                frameLp.height = iconSize;
+                ((View) placeholderIcon.getParent()).setLayoutParams(frameLp);
+            }
+        }
+        placeholderIcon.setBackground(Theme.createCircleDrawable(iconSize,
+                Theme.multAlpha(Theme.getColor(Theme.key_windowBackgroundWhiteGrayText), 0.12f)));
+        imageView.setRoundRadius(iconSize / 2);
+        
+        subtitleView.setVisibility(z ? View.GONE : View.VISIBLE);
+        rowLayout.requestLayout();
+    }
+
+    @Override
+    protected void onMeasure(int i, int i2) {
+        super.onMeasure(View.MeasureSpec.makeMeasureSpec(View.MeasureSpec.getSize(i), MeasureSpec.EXACTLY), i2);
+    }
+
+    public void set(Plugin plugin, final PluginCellDelegate pluginCellDelegate) {
+        set(plugin, pluginCellDelegate, NO_UI_OPERATION_EPOCH);
+    }
+
+    public void set(
+            Plugin plugin,
+            final PluginCellDelegate pluginCellDelegate,
+            long uiOperationEpoch) {
+        if (plugin == null || pluginCellDelegate == null) {
+            return;
+        }
+        final boolean samePlugin = this.plugin != null
+                && TextUtils.equals(this.plugin.getId(), plugin.getId());
+        bindingEpoch++;
+        this.pluginCellDelegate = pluginCellDelegate;
+        this.plugin = plugin;
+        setPinned(PluginsController.isPluginPinned(plugin.getId()));
+        
+        setCompact(NimarkoConfig.pluginsCompactView);
+
+        boolean hasImage = plugin.getPack() != null && plugin.getIndex() >= 0;
+        this.imageView.setVisibility(hasImage ? View.VISIBLE : View.GONE);
+        this.placeholderIcon.setVisibility(hasImage ? View.GONE : View.VISIBLE);
+        if (hasImage) {
+           MediaDataController.getInstance(UserConfig.selectedAccount).setPlaceholderImageByIndex(this.imageView, plugin.getPack(), plugin.getIndex(), "100_100");
+           
+           this.imageView.getImageReceiver().setAutoRepeat(2);
+           this.imageView.getImageReceiver().setAutoRepeatCount(-1);
+        } else {
+            this.imageView.setTag(null);
+            this.imageView.setImage((ImageLocation) null, (String) null, (Drawable) null, 0, (Object) null);
+        }
+        this.pluginNameView.setText(plugin.getName());
+        this.kebabButton.setContentDescription(plugin.getName() + ", "
+                + LocaleController.getString(R.string.AccDescrMoreOptions));
+
+        SpannableStringBuilder sub = new SpannableStringBuilder("v")
+                .append(plugin.getVersion())
+                .append(" · ")
+                .append(LocaleUtils.formatWithUsernames(plugin.getAuthor()));
+        this.subtitleView.setText(sub);
+
+        List<String> reqNames = plugin.getRequirementNames();
+        if (!this.compact && reqNames != null && !reqNames.isEmpty()) {
+            this.requirementsView.setText("⬢ " + TextUtils.join("  ·  ", reqNames));
+            this.requirementsView.setVisibility(View.VISIBLE);
+        } else {
+            this.requirementsView.setVisibility(View.GONE);
+        }
+
+        if (plugin.hasError()) {
+            bindErrorState();
+        } else {
+            bindNormalState();
+        }
+        PluginsController controller = PluginsController.getInstance();
+        boolean requestedEnabled =
+                controller.getRequestedPluginEnabled(plugin.getId());
+        this.checkBox.setChecked(requestedEnabled, samePlugin && isAttachedToWindow());
+        this.checkBox.setContentDescription(plugin.getName() + ", "
+                + LocaleController.getString(
+                requestedEnabled ? R.string.Disable : R.string.Enable));
+        this.checkBox.setOnClickListener(view -> pluginCellDelegate.togglePlugin(this));
+        
+        setLoading(uiOperationEpoch != NO_UI_OPERATION_EPOCH
+                || controller.isTogglingInProgress(plugin.getId())
+                || controller.isEnablingInProgress(plugin.getId()), samePlugin);
+    }
+
+    private void bindErrorState() {
+        showingSavedReport = false;
+        this.descriptionView.setVisibility(View.VISIBLE);
+        Throwable error = this.plugin.getError();
+        String summary = error.getLocalizedMessage();
+        if (TextUtils.isEmpty(summary)) summary = error.getClass().getSimpleName();
+        if (summary.length() > 240) summary = summary.substring(0, 240) + "…";
+        summary = summary.replace('\n', ' ').replace('\r', ' ');
+        this.descriptionView.setText(summary
+                + "\n" + LocaleController.getString(R.string.NM_PluginTapToViewReport));
+        this.descriptionView.setTextColor(Theme.getColor(Theme.key_text_RedRegular));
+        this.descriptionView.setTypeface(AndroidUtilities.getTypeface(AndroidUtilities.TYPEFACE_ROBOTO_MONO));
+        this.descriptionView.setTextSize(1, 12.0f);
+        
+        bindReportActions();
+        
+    }
+
+    private void bindReportActions() {
+
+        final Plugin reportPlugin = this.plugin;
+        this.descriptionView.setOnClickListener(v -> PluginCrashReports.showReport(
+                reportPlugin, LaunchActivity.getSafeLastFragment()));
+        this.descriptionView.setOnLongClickListener(v -> {
+            PluginCrashReports.copyReport(reportPlugin, reportPlugin.getError(),
+                    LaunchActivity.getSafeLastFragment());
+            return true;
+        });
+    }
+
+    public static String stackTraceToString(Throwable th) {
+        StringWriter stringWriter = new StringWriter();
+        th.printStackTrace(new PrintWriter(stringWriter));
+        return stringWriter.toString();
+    }
+
+    private void bindNormalState() {
+        
+        bindSavedReportState(PluginCrashReports.hasReport(this.plugin.getId()));
+    }
+
+    private void bindSavedReportState(boolean available) {
+        showingSavedReport = available;
+        if (available) {
+            this.descriptionView.setVisibility(View.VISIBLE);
+            this.descriptionView.setText(LocaleController.getString(R.string.NM_PluginViewSavedReport));
+            this.descriptionView.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteLinkText));
+            this.descriptionView.setTypeface(AndroidUtilities.getTypeface(AndroidUtilities.TYPEFACE_ROBOTO_REGULAR));
+            this.descriptionView.setTextSize(1, 13.0f);
+            bindReportActions();
+            return;
+        }
+        this.descriptionView.setVisibility(View.GONE);
+        this.descriptionView.setOnClickListener(null);
+        this.descriptionView.setOnLongClickListener(null);
+    }
+
+    private void refreshSavedReportAvailability() {
+
+        if (plugin == null || plugin.hasError()) {
+            return;
+        }
+        boolean available = PluginCrashReports.hasReport(plugin.getId());
+        if (available != showingSavedReport) {
+            bindSavedReportState(available);
+        }
+    }
+
+    public void setChecked(boolean z, boolean z2) {
+        this.checkBox.setChecked(z, z2);
+    }
+
+    public String getPluginId() {
+        return plugin != null ? plugin.getId() : null;
+    }
+
+    public long getBindingEpoch() {
+        return bindingEpoch;
+    }
+
+    public boolean isBoundTo(String pluginId, long expectedBindingEpoch) {
+        return bindingEpoch == expectedBindingEpoch
+                && plugin != null
+                && TextUtils.equals(plugin.getId(), pluginId);
+    }
+
+    public void setPinned(boolean z) {
+        
+    }
+
+    @Override
+    protected void onAttachedToWindow() {
+        super.onAttachedToWindow();
+        NotificationCenter.getGlobalInstance().addObserver(this, NotificationCenter.pluginsUpdated);
+        NotificationCenter.getGlobalInstance().addObserver(this, NotificationCenter.pluginSettingsRegistered);
+        NotificationCenter.getGlobalInstance().addObserver(this, NotificationCenter.pluginSettingsUnregistered);
+        refreshSavedReportAvailability();
+    }
+
+    @Override
+    protected void onDetachedFromWindow() {
+        super.onDetachedFromWindow();
+        setLoading(loading, false);
+        checkBox.setChecked(checkBox.isChecked(), false);
+        NotificationCenter.getGlobalInstance().removeObserver(this, NotificationCenter.pluginsUpdated);
+        NotificationCenter.getGlobalInstance().removeObserver(this, NotificationCenter.pluginSettingsRegistered);
+        NotificationCenter.getGlobalInstance().removeObserver(this, NotificationCenter.pluginSettingsUnregistered);
+    }
+
+    @Override
+    public void didReceivedNotification(int i, int i2, Object... objArr) {
+        
+        if (i == NotificationCenter.pluginsUpdated && isAttachedToWindow()) {
+            refreshSavedReportAvailability();
+            return;
+        }
+    }
+
+    public static class Factory extends UItem.UItemFactory {
+        static {
+            UItem.UItemFactory.setup(new Factory());
+        }
+
+        @Override
+        public boolean equals(UItem a, UItem b) {
+            return a.plugin != null && b.plugin != null
+                    && TextUtils.equals(a.plugin.getId(), b.plugin.getId());
+        }
+        @Override
+        public boolean contentsEquals(UItem a, UItem b) {
+            return false;
+        }
+        @Override
+        public PluginCell createView(Context context, org.telegram.ui.Components.RecyclerListView listView, int currentAccount, int classGuid, Theme.ResourcesProvider resourcesProvider) {
+            return new PluginCell(context, resourcesProvider);
+        }
+
+        @Override
+        public void bindView(View view, UItem item, boolean divider, UniversalAdapter adapter, UniversalRecyclerView listView) {
+            if (view instanceof PluginCell) {
+                PluginCellDelegate delegate = (PluginCellDelegate) item.object;
+                ((PluginCell) view).set(item.plugin, delegate, item.longValue);
+            }
+        }
+
+        public static UItem as(Plugin plugin, PluginCellDelegate delegate) {
+            return as(plugin, delegate, NO_UI_OPERATION_EPOCH);
+        }
+
+        public static UItem as(
+                Plugin plugin,
+                PluginCellDelegate delegate,
+                long uiOperationEpoch) {
+            UItem item = UItem.ofFactory(Factory.class);
+            item.plugin = plugin;
+            item.object = delegate;
+            item.longValue = uiOperationEpoch;
+            return item;
+        }
+    }
+}

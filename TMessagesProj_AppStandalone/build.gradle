@@ -1,0 +1,231 @@
+/* Modifications Copyright (C) 2026 Ettacent */
+
+apply plugin: 'com.android.application'
+apply plugin: 'org.telegram.build-app-plugin'
+if (nimarkoFirebaseEnabled) {
+    apply plugin: 'com.google.firebase.crashlytics'
+}
+
+// Opt-in size-audit build. Keep the production path unchanged until the
+// resulting resource/R8 reports have been reviewed for plugin compatibility.
+def nimarkoCompactStandalone = project.hasProperty('ngCompactStandalone')
+
+repositories {
+    mavenCentral()
+    google()
+}
+
+configurations {
+    compile.exclude module: 'support-v4'
+}
+
+configurations.all {
+    exclude group: 'com.google.firebase', module: 'firebase-core'
+    exclude group: 'androidx.recyclerview', module: 'recyclerview'
+}
+
+dependencies {
+    implementation project(':TMessagesProj')
+    implementation 'androidx.fragment:fragment:1.8.9'
+    implementation 'androidx.core:core:1.16.0'
+    implementation 'com.google.firebase:firebase-crashlytics:20.1.1'
+    implementation 'com.google.firebase:firebase-crashlytics-ndk:20.1.1'
+    coreLibraryDesugaring 'com.android.tools:desugar_jdk_libs:2.1.5'
+    implementation files('../TMessagesProj/libs/libgsaverification-client.aar')
+}
+
+android {
+    compileSdkVersion 36
+    buildToolsVersion '36.0.0'
+    // Keep the application and native library modules on the same installed
+    // toolchain. A mismatched/missing NDK made AGP package unstripped JNI
+    // libraries and silently inflated standalone APKs.
+    ndkVersion "26.3.11579264"
+
+    defaultConfig.applicationId = APP_PACKAGE
+
+    sourceSets.main.jniLibs.srcDirs = ['../TMessagesProj/jni/']
+
+    lintOptions {
+        disable 'MissingTranslation'
+        disable 'ExtraTranslation'
+        disable 'BlockedPrivateApi'
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+
+        coreLibraryDesugaringEnabled true
+    }
+
+    androidResources {
+        noCompress += "pack"
+        localeFilters += ["zz"]
+    }
+
+    signingConfigs {
+        debug {
+            enableV1Signing true
+            enableV2Signing true
+            enableV3Signing true
+            enableV4Signing false
+        }
+
+        release {
+            if (nimarkoReleaseSigningConfigured) {
+                storeFile rootProject.file(nimarkoSigning.RELEASE_STORE_FILE)
+                storePassword nimarkoSigning.RELEASE_STORE_PASSWORD
+                keyAlias nimarkoSigning.RELEASE_KEY_ALIAS
+                keyPassword nimarkoSigning.RELEASE_KEY_PASSWORD
+            }
+            enableV1Signing true
+            enableV2Signing true
+            enableV3Signing true
+            enableV4Signing false
+        }
+    }
+
+    buildTypes {
+        debug {
+            debuggable true
+            jniDebuggable true
+            signingConfig signingConfigs.debug
+            minifyEnabled false
+            multiDexEnabled true
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), '../TMessagesProj/proguard-rules.pro'
+            ndk.debugSymbolLevel = 'FULL'
+        }
+        standalone {
+            matchingFallbacks = ['release']
+            if (nimarkoFirebaseEnabled) {
+                firebaseCrashlytics {
+                    nativeSymbolUploadEnabled nimarkoCrashlyticsUploadEnabled
+                    unstrippedNativeLibsDir project(':TMessagesProj').layout.buildDirectory.dir('intermediates/merged_native_libs/standalone/mergeStandaloneNativeLibs/out/lib')
+                }
+            }
+            debuggable false
+            jniDebuggable false
+            signingConfig nimarkoReleaseSigningConfigured ? signingConfigs.release : null
+            // The normal standalone artifact remains plugins-friendly. Passing
+            // -PngCompactStandalone enables an isolated, measurable experiment
+            // with app-level R8 and resource shrinking; it is never implicit.
+            minifyEnabled nimarkoCompactStandalone
+            shrinkResources nimarkoCompactStandalone
+            multiDexEnabled true
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), '../TMessagesProj/proguard-rules.pro'
+            ndk.debugSymbolLevel = 'FULL'
+        }
+    }
+
+    // NimarkoGram: rebrand the published applicationId for this variant only.
+    // Upstream TG namespace ('org.telegram.messenger') stays intact for compatibility
+    // (TG core references it everywhere — renaming the whole package is out of scope).
+    // Final ids (no ".web" suffix anymore — see buildTypes comments):
+    //   debug      -> app.nimarkogram.messenger
+    //   standalone -> app.nimarkogram.messenger
+    defaultConfig.applicationId = 'app.nimarkogram.messenger'
+
+    sourceSets.debug {
+        manifest.srcFile '../TMessagesProj/config/release/AndroidManifest_standalone.xml'
+    }
+    sourceSets.standalone {
+        manifest.srcFile '../TMessagesProj/config/release/AndroidManifest_standalone.xml'
+    }
+
+    flavorDimensions "minApi"
+
+    productFlavors {
+        afat {
+            ndk {
+                // Hybrid ARM-only APK covering 64-bit and 32-bit ARM devices.
+                abiFilters "arm64-v8a", "armeabi-v7a"
+            }
+            ext {
+                abiVersionCode = 1
+            }
+            sourceSets.standalone {
+                manifest.srcFile '../TMessagesProj/config/release/AndroidManifest_standalone.xml'
+            }
+        }
+    }
+
+    defaultConfig.versionCode = Integer.parseInt(APP_VERSION_CODE)
+
+    applicationVariants.all { variant ->
+        variant.outputs.all { output ->
+            outputFileName = "app.apk"
+            output.versionCodeOverride = project.hasProperty('APP_VERSION_CODE_OVERRIDE')
+                    ? Integer.parseInt(APP_VERSION_CODE_OVERRIDE)
+                    : defaultConfig.versionCode * 10 + variant.productFlavors.get(0).abiVersionCode
+        }
+    }
+
+    variantFilter { variant ->
+        def names = variant.flavors*.name
+        if (variant.buildType.name != "release" && !names.contains("afat")) {
+            setIgnore(true)
+        }
+    }
+
+    defaultConfig {
+        minSdkVersion 24
+        targetSdkVersion 36
+        versionName APP_VERSION_NAME
+
+        multiDexEnabled true
+
+        vectorDrawables.generatedDensities = ['mdpi', 'hdpi', 'xhdpi', 'xxhdpi']
+
+        externalNativeBuild {
+            cmake {
+                version '3.22.1'
+                arguments '-DANDROID_STL=c++_static', '-DANDROID_PLATFORM=android-24' //, '-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON'
+                targets 'tmessages.49'
+            }
+        }
+    }
+
+    buildFeatures {
+        buildConfig = true
+    }
+    namespace 'org.telegram.messenger.web'
+
+    lintOptions {
+        checkReleaseBuilds false
+    }
+}
+
+if (nimarkoFirebaseEnabled) {
+    apply plugin: 'com.google.gms.google-services'
+}
+
+androidComponents {
+    onVariants(selector().withBuildType('standalone')) { variant ->
+        if (!nimarkoCrashlyticsUploadEnabled) {
+            return
+        }
+        def variantName = variant.name.capitalize()
+        if (!nimarkoCompactStandalone) {
+            tasks.withType(com.google.firebase.crashlytics.buildtools.gradle.tasks.InjectMappingFileIdTask).configureEach {
+                if (name == "injectCrashlyticsMappingFileId${variantName}") {
+                    useBlankMappingFileId.set(false)
+                }
+            }
+            tasks.register("uploadCrashlyticsMappingFile${variantName}",
+                    com.google.firebase.crashlytics.buildtools.gradle.tasks.UploadMappingFileTask) {
+                dependsOn ':TMessagesProj:minifyStandaloneWithR8', "process${variantName}GoogleServices"
+                mergedMappingFile.set(project(':TMessagesProj').layout.buildDirectory.file('outputs/mapping/standalone/mapping.txt'))
+                mappingFileIdFile.set(tasks.named("injectCrashlyticsMappingFileId${variantName}").flatMap { it.mappingFileIdFile })
+                appIdFile.set(layout.buildDirectory.file("gmpAppId/${variant.name}.txt"))
+                buildDir.set(layout.buildDirectory.dir("crashlytics/${variant.name}"))
+            }
+        }
+        tasks.matching { it.name == "generateCrashlyticsSymbolFile${variantName}" }.configureEach {
+            dependsOn ':TMessagesProj:mergeStandaloneNativeLibs'
+        }
+        tasks.matching { it.name == "assemble${variantName}" }.configureEach {
+            finalizedBy "uploadCrashlyticsMappingFile${variantName}", "uploadCrashlyticsSymbolFile${variantName}"
+        }
+    }
+}

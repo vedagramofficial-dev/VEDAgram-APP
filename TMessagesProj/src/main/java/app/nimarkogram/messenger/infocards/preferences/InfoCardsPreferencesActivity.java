@@ -1,0 +1,206 @@
+/* Modifications Copyright (C) 2026 Ettacent */
+
+package app.nimarkogram.messenger.infocards.preferences;
+
+import android.content.Context;
+import android.util.SparseArray;
+import android.view.View;
+
+import java.util.ArrayList;
+import java.util.List;
+
+import org.telegram.messenger.LocaleController;
+import org.telegram.messenger.NotificationCenter;
+import org.telegram.messenger.R;
+import org.telegram.ui.Components.UItem;
+import org.telegram.ui.Components.UniversalAdapter;
+
+import app.nimarkogram.messenger.preferences.BasePreferencesActivity;
+import app.nimarkogram.messenger.preferences.helpers.PopupHelper;
+import app.nimarkogram.messenger.infocards.InfoCardRegistry;
+import app.nimarkogram.messenger.infocards.InfoCardType;
+import app.nimarkogram.messenger.infocards.InfoCardsConfig;
+
+public class InfoCardsPreferencesActivity extends BasePreferencesActivity implements InfoCardRowView.Listener {
+
+    private static final int ID_ENABLED            = 100;
+    private static final int ID_INFINITE_SCROLL    = 101;
+    private static final int ID_AUTO_SCROLL        = 102;
+
+    private static final int ID_CARD_BASE          = 1000;
+
+    private int activeReorderSectionId = -1;
+
+    private static final String[] CURRENCIES = {
+            "AUTO", "USD", "EUR", "RUB", "GBP", "UAH", "KZT", "PLN", "TRY", "CNY", "JPY", "BYN", "INR"
+    };
+
+    private final SparseArray<InfoCardRowView> rows = new SparseArray<>();
+
+    @Override
+    public String getTitle() {
+        return LocaleController.getString(R.string.NM_CARDS_Title);
+    }
+
+    @Override
+    public View createView(Context context) {
+        View view = super.createView(context);
+        listView.listenReorder(this::onReordered);
+        listView.allowReorder(true);
+        return view;
+    }
+
+    @Override
+    public void onFragmentDestroy() {
+        rows.clear();
+        super.onFragmentDestroy();
+    }
+
+    private InfoCardRowView getRow(InfoCardRegistry.CardInfo info, boolean active) {
+        InfoCardRowView row = rows.get(info.id);
+        if (row == null) {
+            row = new InfoCardRowView(getParentActivity(), getResourceProvider());
+            row.setListener(this);
+            rows.put(info.id, row);
+        }
+
+        row.bind(info, active, active && hasOptions(info.id));
+        return row;
+    }
+
+    private static boolean hasOptions(int id) {
+        return id == InfoCardType.TON.id || id == InfoCardType.USD.id;
+    }
+
+    @Override
+    public void fillItems(ArrayList<UItem> items, UniversalAdapter adapter) {
+        final boolean enabled = InfoCardsConfig.isEnabled();
+
+        items.add(UItem.asHeader(-1, LocaleController.getString(R.string.NM_CARDS_GeneralHeader)));
+        items.add(UItem.asCheck(ID_ENABLED, LocaleController.getString(R.string.NM_CARDS_Enable))
+                .setChecked(enabled));
+
+        if (enabled) {
+            items.add(UItem.asCheck(ID_INFINITE_SCROLL,
+                            LocaleController.getString(R.string.NM_CARDS_InfiniteScroll))
+                    .setChecked(InfoCardsConfig.isInfiniteScrolling()));
+
+            items.add(UItem.asCheck(ID_AUTO_SCROLL,
+                            LocaleController.getString(R.string.NM_CARDS_AutoScroll))
+                    .setChecked(InfoCardsConfig.isAutoScroll()));
+
+            final List<Integer> active = InfoCardsConfig.getActiveCards();
+            final List<Integer> hidden = InfoCardsConfig.getHiddenCards();
+
+            items.add(UItem.asShadow(-2, null));
+            items.add(UItem.asHeader(-3, LocaleController.getString(R.string.NM_CARDS_ActiveHeader)));
+
+            activeReorderSectionId = adapter.reorderSectionStart();
+            for (int pillId : active) {
+                InfoCardRegistry.CardInfo info = InfoCardRegistry.get(pillId);
+                if (info == null) continue;
+                items.add(UItem.asCustom(ID_CARD_BASE + pillId, getRow(info, true)));
+            }
+            adapter.reorderSectionEnd();
+
+            if (!hidden.isEmpty()) {
+                items.add(UItem.asShadow(-4, null));
+                items.add(UItem.asHeader(-5, LocaleController.getString(R.string.NM_CARDS_HiddenHeader)));
+                for (int pillId : hidden) {
+                    InfoCardRegistry.CardInfo info = InfoCardRegistry.get(pillId);
+                    if (info == null) continue;
+                    items.add(UItem.asCustom(ID_CARD_BASE + pillId, getRow(info, false)));
+                }
+            }
+        }
+
+        items.add(UItem.asShadow(-6, LocaleController.getString(R.string.NM_CARDS_Footer)));
+    }
+
+    @Override
+    public void onClick(UItem item, View view, int position, float x, float y) {
+        if (item == null) return;
+        final int id = item.id;
+
+        if (id == ID_ENABLED) {
+            InfoCardsConfig.setEnabled(!InfoCardsConfig.isEnabled());
+            updateCheckState(view, InfoCardsConfig.isEnabled());
+            reload();
+        } else if (id == ID_INFINITE_SCROLL) {
+            boolean v = !InfoCardsConfig.isInfiniteScrolling();
+            InfoCardsConfig.setInfiniteScrolling(v);
+            updateCheckState(view, v);
+        } else if (id == ID_AUTO_SCROLL) {
+            boolean v = !InfoCardsConfig.isAutoScroll();
+            InfoCardsConfig.setAutoScroll(v);
+            updateCheckState(view, v);
+            NotificationCenter.getGlobalInstance().postNotificationName(NotificationCenter.infoCardsSettingsChanged);
+        }
+    }
+
+    @Override
+    public void onToggle(int pillId, boolean active) {
+        if (active) {
+            moveToActive(pillId);
+        } else {
+            moveToHidden(pillId);
+        }
+
+        reload();
+    }
+
+    @Override
+    public void onBodyTap(int pillId) {
+
+        if (!InfoCardsConfig.isCardActive(pillId) || !hasOptions(pillId)) return;
+        showCurrencyPicker(pillId);
+    }
+
+    private void showCurrencyPicker(int pillId) {
+        ArrayList<String> currencies = new ArrayList<>();
+        for (String currency : CURRENCIES) {
+            if (InfoCardsConfig.isTargetCurrencyAllowed(pillId, currency)) currencies.add(currency);
+        }
+        ArrayList<String> labels = new ArrayList<>(currencies);
+        labels.set(0, LocaleController.getString(R.string.Default));
+        int selected = Math.max(0, currencies.indexOf(InfoCardsConfig.getTargetCurrency(pillId)));
+        PopupHelper.show(labels, LocaleController.getString(R.string.NM_CARDS_Title), selected, getParentActivity(), i -> {
+            InfoCardsConfig.setTargetCurrency(pillId, currencies.get(i));
+            reload();
+        });
+    }
+
+    private void moveToHidden(int pillId) {
+        List<Integer> active = InfoCardsConfig.getActiveCards();
+        List<Integer> hidden = InfoCardsConfig.getHiddenCards();
+        if (active.size() <= 1) return;
+        if (!active.remove((Integer) pillId)) return;
+        if (!hidden.contains(pillId)) hidden.add(pillId);
+        InfoCardsConfig.setLayout(active, hidden);
+    }
+
+    private void moveToActive(int pillId) {
+        List<Integer> active = InfoCardsConfig.getActiveCards();
+        List<Integer> hidden = InfoCardsConfig.getHiddenCards();
+        if (!hidden.remove((Integer) pillId)) return;
+        if (!active.contains(pillId)) active.add(pillId);
+        InfoCardsConfig.setLayout(active, hidden);
+    }
+
+    private void onReordered(int sectionId, ArrayList<UItem> reordered) {
+        if (sectionId != activeReorderSectionId) return;
+        ArrayList<Integer> newActive = new ArrayList<>();
+        for (UItem it : reordered) {
+            if (it.id >= ID_CARD_BASE && it.id < ID_CARD_BASE + 1000) {
+                newActive.add(it.id - ID_CARD_BASE);
+            }
+        }
+        if (newActive.isEmpty()) return;
+        InfoCardsConfig.setLayout(newActive, InfoCardsConfig.getHiddenCards());
+    }
+
+    private void reload() {
+        updateItemsAfterToggle();
+    }
+
+}

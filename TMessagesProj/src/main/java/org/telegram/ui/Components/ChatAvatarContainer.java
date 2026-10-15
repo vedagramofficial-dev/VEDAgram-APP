@@ -1,0 +1,3176 @@
+/* Modifications Copyright (C) 2026 Ettacent */
+
+/*
+ * This is the source code of Telegram for Android v. 5.x.x.
+ * It is licensed under GNU GPL v. 2 or later.
+ * You should have received a copy of the license in this archive (see LICENSE).
+ *
+ * Copyright Nikolai Kudashov, 2013-2018.
+ */
+
+package org.telegram.ui.Components;
+
+import static org.telegram.messenger.AndroidUtilities.dp;
+import static org.telegram.messenger.AndroidUtilities.dpf2;
+import static org.telegram.messenger.AndroidUtilities.replaceArrows;
+import static org.telegram.messenger.LocaleController.getString;
+
+import android.animation.Animator;
+import android.animation.AnimatorListenerAdapter;
+import android.animation.AnimatorSet;
+import android.animation.ObjectAnimator;
+import android.animation.ValueAnimator;
+import android.graphics.Bitmap;
+import android.graphics.Paint;
+import android.content.Context;
+import android.graphics.Canvas;
+import android.graphics.PorterDuff;
+import android.graphics.PorterDuffColorFilter;
+import android.graphics.PorterDuffXfermode;
+import android.graphics.drawable.BitmapDrawable;
+import android.graphics.drawable.Drawable;
+import android.os.Bundle;
+import android.text.TextPaint;
+import android.text.TextUtils;
+import android.view.Gravity;
+import android.view.MotionEvent;
+import android.view.View;
+import android.view.ViewConfiguration;
+import android.view.accessibility.AccessibilityNodeInfo;
+import android.widget.FrameLayout;
+import android.widget.ImageView;
+
+import androidx.annotation.NonNull;
+import androidx.core.content.ContextCompat;
+
+import app.nimarkogram.messenger.utils.NimarkoUiAnimationClock;
+import org.telegram.messenger.AndroidUtilities;
+import org.telegram.messenger.ApplicationLoader;
+import org.telegram.messenger.ChatObject;
+import org.telegram.messenger.DialogObject;
+import org.telegram.messenger.Emoji;
+import org.telegram.messenger.FileLog;
+import org.telegram.messenger.ImageLoader;
+import org.telegram.messenger.ImageReceiver;
+import org.telegram.messenger.LocaleController;
+import org.telegram.messenger.MessagesController;
+import org.telegram.messenger.NotificationCenter;
+import org.telegram.messenger.R;
+import org.telegram.messenger.SharedConfig;
+import org.telegram.messenger.UserConfig;
+import org.telegram.messenger.UserObject;
+import org.telegram.tgnet.ConnectionsManager;
+import org.telegram.tgnet.TLRPC;
+import org.telegram.ui.ActionBar.ActionBar;
+import org.telegram.ui.ActionBar.ActionBarPopupWindow;
+import org.telegram.ui.ActionBar.BaseFragment;
+import org.telegram.ui.ActionBar.SimpleTextView;
+import org.telegram.ui.ActionBar.Theme;
+import org.telegram.ui.Business.BusinessLinksController;
+import org.telegram.ui.ChatActivity;
+import org.telegram.ui.DialogsActivity;
+import org.telegram.ui.Components.Forum.ForumUtilities;
+import org.telegram.ui.ProfileActivity;
+import org.telegram.ui.Stories.StoriesUtilities;
+import org.telegram.ui.TopicsFragment;
+import org.telegram.ui.community.CommunityArrowDrawable;
+
+import java.util.concurrent.atomic.AtomicReference;
+
+import me.vkryl.android.animator.BoolAnimator;
+import me.vkryl.android.animator.FactorAnimator;
+
+public class ChatAvatarContainer extends FrameLayout implements FactorAnimator.Target, NotificationCenter.NotificationCenterDelegate {
+
+    private static final int ANIMATOR_ID_TIME_ITEM_VISIBLE = 0;
+    private static final int COMMUNITY_BADGE_TOUCH_SIZE_DP = 28;
+    private static final int INLINE_COMMUNITY_TOUCH_SIZE_DP = 32;
+    private static final int INLINE_COMMUNITY_GAP_DP = 2;
+    private final BoolAnimator animatorTimeVisible = new BoolAnimator(ANIMATOR_ID_TIME_ITEM_VISIBLE, this, CubicBezierInterpolator.EASE_OUT_QUINT, 320);
+
+    private boolean centerChatTitle = app.nimarkogram.messenger.NimarkoConfig.centerChatTitle;
+    private boolean useChatTitleLayoutOutsideChat;
+
+    private boolean resolveCenterChatTitle() {
+        if (!app.nimarkogram.messenger.NimarkoConfig.centerChatTitle) {
+            return false;
+        }
+        if (parentFragment == null) {
+            return useChatTitleLayoutOutsideChat;
+        }
+        return parentFragment != null
+                && parentFragment.getChatMode() != ChatActivity.MODE_SAVED
+                && !parentFragment.isReplyChatComment()
+                && parentFragment.getDialogId() != 0
+                && parentFragment.getDialogId() != UserConfig.getInstance(currentAccount).getClientUserId()
+                && parentFragment.getDialogId() != org.telegram.messenger.UserObject.REPLY_BOT;
+    }
+
+    private void updateCenterChatTitleState() {
+        boolean value = resolveCenterChatTitle();
+        if (centerChatTitle == value) {
+            return;
+        }
+        centerChatTitle = value;
+        if (titleTextView != null) {
+            titleTextView.setGravity(value ? Gravity.CENTER_HORIZONTAL : Gravity.LEFT);
+            titleTextView.setRightDrawableOutside(true);
+            titleTextView.setScrollNonFitText(true);
+        }
+        if (subtitleTextView != null) {
+            subtitleTextView.setScrollNonFitText(false);
+            subtitleTextView.setGravity(value ? Gravity.CENTER_HORIZONTAL : Gravity.LEFT);
+            subtitleTextView.setPadding(value ? dp(10) : 0, 0, dp(10), 0);
+            subtitleTextView.setEllipsizeByGradient(
+                    true,
+                    useChatTitleLayoutOutsideChat ? LocaleController.isRTL : null);
+        }
+        if (animatedSubtitleTextView != null) {
+            animatedSubtitleTextView.setGravity(value ? Gravity.CENTER_HORIZONTAL : Gravity.LEFT);
+            animatedSubtitleTextView.setPadding(value ? dp(10) : 0, 0, dp(10), 0);
+        }
+        if (timeItem != null) {
+            timeItem.setPadding(value ? dp(5) : 10, dp(10), value ? dp(20) : 5, dp(5));
+        }
+        updateCommunityIndicatorStyle();
+        if (value || useChatTitleLayoutOutsideChat) {
+            clearLargerTextCopies();
+        }
+        if (actionBar != null) {
+            actionBar.checkAvatarContainerWidth(!useChatTitleLayoutOutsideChat);
+            actionBar.requestLayout();
+            actionBar.invalidate();
+        }
+    }
+
+    public boolean isCenterChatTitleEnabled() {
+        return centerChatTitle;
+    }
+
+    public boolean isInlineCenteredAvatar() {
+        return useChatTitleLayoutOutsideChat && centerChatTitle;
+    }
+
+    public boolean shouldUseCompactTitleIsland() {
+        return centerChatTitle;
+    }
+
+    private int nmLastCenteredAvatarGlobalCx = Integer.MIN_VALUE;
+
+    private int resolveCenteredAvatarCx() {
+        if (!(getParent() instanceof ActionBar)) {
+            return (getWidth() - leftPadding) - dp(24);
+        }
+        ActionBar parentActionBar = (ActionBar) getParent();
+        View headerItem = parentFragment != null ? parentFragment.getHeaderItem() : null;
+        if (headerItem != null && headerItem.getVisibility() == VISIBLE
+                && headerItem.getWidth() > 0 && headerItem.getParent() instanceof View) {
+            View menuView = (View) headerItem.getParent();
+            nmLastCenteredAvatarGlobalCx = Math.round(menuView.getX() + headerItem.getX() + headerItem.getWidth() / 2f);
+            return Math.round(nmLastCenteredAvatarGlobalCx - getX());
+        }
+        if (nmLastCenteredAvatarGlobalCx != Integer.MIN_VALUE) {
+            return Math.round(nmLastCenteredAvatarGlobalCx - getX());
+        }
+        float menuTranslation = parentActionBar.menu != null ? parentActionBar.menu.getTranslationX() : 0f;
+        return Math.round(parentActionBar.getWidth() - dp(24) + menuTranslation - getX());
+    }
+
+    public void syncCenteredAvatarAnchor() {
+        if (avatarImageView == null) {
+            return;
+        }
+        float translation = 0f;
+        if (centerChatTitle && !isInlineCenteredAvatar() && avatarImageView.getWidth() > 0) {
+            float laidOutCenter = avatarImageView.getLeft() + avatarImageView.getWidth() / 2f;
+            translation = resolveCenteredAvatarCx() - laidOutCenter;
+        }
+        avatarImageView.setTranslationX(translation);
+        if (communityItem != null) {
+            communityItem.setTranslationX(shouldUseInlineCommunityIndicator() ? 0f : translation);
+        }
+        if (timeItem != null) {
+            timeItem.setTranslationX(translation);
+        }
+    }
+    public boolean allowDrawStories;
+    private Integer storiesForceState;
+    private int avatarSizeInDp = 42;
+    public BackupImageView avatarImageView;
+    private boolean avatarImageIsHidden;
+    private SimpleTextView titleTextView;
+    private AtomicReference<SimpleTextView> titleTextLargerCopyView = new AtomicReference<>();
+    private SimpleTextView subtitleTextView;
+    private AnimatedTextView animatedSubtitleTextView;
+    private AtomicReference<SimpleTextView> subtitleTextLargerCopyView = new AtomicReference<>();
+    private ImageView timeItem;
+    private ImageView communityItem;
+    private CommunityArrowDrawable communityArrowDrawable;
+    private ImageView starBgItem, starFgItem;
+    private TimerDrawable timerDrawable;
+    private ChatActivity parentFragment;
+    private StatusDrawable[] statusDrawables = new StatusDrawable[6];
+    private AvatarDrawable avatarDrawable = new AvatarDrawable();
+    private org.telegram.tgnet.TLObject headerIdentityTarget;
+    private int currentAccount = UserConfig.selectedAccount;
+    private boolean occupyStatusBar = true;
+    private int leftPadding = dp(8);
+    private int rightAvatarPadding = 0;
+    private int nmCenteredAvatarCx;   // NimarkoGram: centered-title avatar center-x (aligned to the headerItem at layout time)
+    StatusDrawable currentTypingDrawable;
+
+    private int lastWidth = -1;
+    private int largerWidth = -1;
+
+    private AnimatorSet titleAnimation;
+
+    private boolean[] isOnline = new boolean[1];
+    public boolean[] statusMadeShorter = new boolean[1];
+
+    private boolean secretChatTimer;
+
+    private int onlineCount = -1;
+    private int currentConnectionState;
+    private CharSequence lastSubtitle;
+    private SimpleTextView.ScrollingState subtitleScrollingState;
+    private float inlineSubtitleWidthReserve;
+    private int subtitleTransitionGeneration;
+    private CharSequence subtitleTransitionTarget;
+    private boolean subtitleTransitionRunning;
+    private float subtitleWidthTransitionStart;
+    private int requestedTypingType = -1;
+    private int appliedTypingType = -1;
+    private boolean subtitleHiddenByPreference;
+    private boolean inlineTextClipEnabled;
+    private int inlineTextClipLeft;
+    private int inlineTextClipRight;
+    private int lastSubtitleColorKey = -1;
+    private Integer overrideSubtitleColor;
+
+    private SharedMediaLayout.SharedMediaPreloader sharedMediaPreloader;
+    private Theme.ResourcesProvider resourcesProvider;
+
+    public boolean allowShorterStatus = false;
+    public boolean premiumIconHiddable = false;
+
+    private final AnimatedEmojiDrawable.SwapAnimatedEmojiDrawable emojiStatusDrawable;
+    private final AnimatedEmojiDrawable.SwapAnimatedEmojiDrawable botVerificationDrawable;
+    private AnimatedEmojiDrawable.SwapAnimatedEmojiDrawable badgeEmojiDrawable;
+    private app.nimarkogram.messenger.api.dto.BadgeDTO currentNimarkoBadge;
+
+    protected boolean useAnimatedSubtitle() {
+        return false;
+    }
+
+    public void hideSubtitle() {
+        if (getSubtitleTextView() != null) {
+            getSubtitleTextView().setVisibility(View.GONE);
+        }
+        inlineSubtitleWidthReserve = 0f;
+        checkActionBar(true);
+    }
+
+    public void setStoriesForceState(Integer storiesForceState) {
+        this.storiesForceState = storiesForceState;
+    }
+
+    private class SimpleTextConnectedView extends SimpleTextView {
+
+        private AtomicReference<SimpleTextView> reference;
+        public SimpleTextConnectedView(Context context, AtomicReference<SimpleTextView> reference) {
+            super(context);
+            this.reference = reference;
+        }
+
+        @Override
+        public void setTranslationY(float translationY) {
+            if (reference != null) {
+                SimpleTextView connected = reference.get();
+                if (connected != null) {
+                    connected.setTranslationY(translationY);
+                }
+            }
+            super.setTranslationY(translationY);
+        }
+
+        @Override
+        public boolean setText(CharSequence value) {
+            if (reference != null) {
+                SimpleTextView connected = reference.get();
+                if (connected != null) {
+                    connected.setText(value);
+                }
+            }
+            return super.setText(value);
+        }
+    }
+    private class TitleTextView extends SimpleTextConnectedView {
+        private boolean fadeCentered;
+        private final MessagePreviewCrossfade nameCrossfade = new MessagePreviewCrossfade(
+                this, this::onNameFadeFrame, () -> fadeCentered);
+        private boolean pendingNameReveal;
+        private boolean hasPresentedTitle;
+        private float presentedNameProgress = 1f;
+        private int presentedAccount;
+        private long presentedDialogId;
+        private long presentedThreadId;
+
+        TitleTextView(Context context) {
+            super(context, titleTextLargerCopyView);
+        }
+
+        private long titleDialogId() {
+            if (headerIdentityTarget instanceof TLRPC.Chat) return -((TLRPC.Chat) headerIdentityTarget).id;
+            if (headerIdentityTarget instanceof TLRPC.User) return ((TLRPC.User) headerIdentityTarget).id;
+            return parentFragment == null ? 0 : parentFragment.getDialogId();
+        }
+
+        private long titleThreadId() {
+            return parentFragment == null ? 0 : parentFragment.getThreadId();
+        }
+
+        private boolean isTitlePresentationVisible() {
+            if (NimarkoUiAnimationClock.isPaused() || !isLaidOut() || !isAttachedToWindow()
+                    || !isShown() || getWindowVisibility() != VISIBLE) return false;
+            for (View view = this; view != null;
+                    view = view.getParent() instanceof View ? (View) view.getParent() : null) {
+                if (view.getVisibility() != VISIBLE || view.getAlpha() <= 0f) return false;
+            }
+            return true;
+        }
+
+        private boolean hasMatchingTitleIdentity() {
+            return presentedAccount == currentAccount && presentedDialogId != 0
+                    && presentedDialogId == titleDialogId() && presentedThreadId == titleThreadId();
+        }
+
+        private void onNameFadeFrame() {
+            if (nameCrossfade.isRunning() && !isTitlePresentationVisible()) {
+                if (hasMatchingTitleIdentity()) {
+                    nameCrossfade.capture(this::drawTitle, false, presentedNameProgress);
+                    presentedNameProgress = nameCrossfade.getProgress();
+                    pendingNameReveal = nameCrossfade.getProgress() < 1f;
+                } else {
+                    nameCrossfade.finish();
+                    pendingNameReveal = false;
+                }
+                hasPresentedTitle = false;
+            }
+            ChatAvatarContainer.this.invalidate();
+            if (nameCrossfade.getProgress() == 1f) requestLayout();
+        }
+
+        @Override
+        public boolean setText(CharSequence value) {
+            boolean sameIdentity = (hasPresentedTitle || pendingNameReveal) && hasMatchingTitleIdentity();
+            boolean changed = !TextUtils.equals(getText(), value);
+            if (!sameIdentity || !SharedConfig.animationsEnabled()) {
+                hasPresentedTitle = false;
+                pendingNameReveal = false;
+                nameCrossfade.finish();
+            }
+            if (changed) {
+                if (sameIdentity && SharedConfig.animationsEnabled()
+                        && !TextUtils.isEmpty(getText()) && !TextUtils.isEmpty(value)) {
+                    clearLargerTextCopies();
+                    if (nameCrossfade.getProgress() == 1f) fadeCentered = centerChatTitle;
+                    boolean visible = isTitlePresentationVisible();
+                    nameCrossfade.capture(this::drawTitle, visible, presentedNameProgress);
+                    presentedNameProgress = nameCrossfade.getProgress();
+                    pendingNameReveal = !visible && nameCrossfade.getProgress() < 1f;
+                    if (!visible) hasPresentedTitle = false;
+                } else {
+                    hasPresentedTitle = false;
+                    pendingNameReveal = false;
+                    nameCrossfade.finish();
+                }
+            }
+            boolean result = super.setText(value);
+            if (changed) {
+                requestLayout();
+                checkActionBar(true);
+            }
+            return result;
+        }
+
+        private void drawTitle(Canvas canvas) {
+            super.onDraw(canvas);
+        }
+
+        @Override
+        protected void onDraw(Canvas canvas) {
+            if ((!SharedConfig.animationsEnabled() || fadeCentered != centerChatTitle
+                    || !hasMatchingTitleIdentity()) && nameCrossfade.getProgress() < 1f) {
+                nameCrossfade.finish();
+                pendingNameReveal = false;
+                hasPresentedTitle = false;
+            }
+            if (pendingNameReveal && canvas.isHardwareAccelerated() && isTitlePresentationVisible()) {
+                pendingNameReveal = false;
+                nameCrossfade.start();
+            }
+            nameCrossfade.draw(canvas, this::drawTitle);
+            if (canvas.isHardwareAccelerated() && isTitlePresentationVisible()) {
+                hasPresentedTitle = true;
+                presentedAccount = currentAccount;
+                presentedDialogId = titleDialogId();
+                presentedThreadId = titleThreadId();
+                presentedNameProgress = nameCrossfade.getProgress();
+            }
+        }
+
+        @Override
+        protected void onWindowVisibilityChanged(int visibility) {
+            super.onWindowVisibilityChanged(visibility);
+            if (visibility != VISIBLE && nameCrossfade.isRunning()) {
+                nameCrossfade.capture(this::drawTitle, false, presentedNameProgress);
+                presentedNameProgress = nameCrossfade.getProgress();
+                pendingNameReveal = nameCrossfade.getProgress() < 1f;
+                hasPresentedTitle = false;
+            }
+        }
+
+        @Override
+        protected void onDetachedFromWindow() {
+            hasPresentedTitle = false;
+            pendingNameReveal = false;
+            nameCrossfade.finish();
+            super.onDetachedFromWindow();
+        }
+    }
+    private class SubtitleTextView extends SimpleTextConnectedView {
+        private Bitmap outgoing;
+        private final Paint fadePaint = new Paint(Paint.FILTER_BITMAP_FLAG);
+        private final Paint incomingPaint = new Paint();
+        private ValueAnimator crossfade;
+        private float progress = 1f;
+        private boolean capturingSubtitle;
+        private boolean hasPresentedSubtitle;
+        private boolean pendingReveal;
+        private boolean fadeCentered;
+        private float presentedProgress = 1f;
+        private float presentedGlassWidth = Float.NaN;
+        private int presentedAccount;
+        private long presentedDialogId;
+        private long presentedThreadId;
+        SubtitleTextView(Context context) {
+            super(context, subtitleTextLargerCopyView);
+            incomingPaint.setXfermode(new PorterDuffXfermode(PorterDuff.Mode.ADD));
+        }
+        private long getSubtitleDialogId() {
+            if (parentFragment != null) {
+                return parentFragment.getDialogId();
+            }
+            if (headerIdentityTarget instanceof TLRPC.Chat) {
+                return -((TLRPC.Chat) headerIdentityTarget).id;
+            }
+            if (headerIdentityTarget instanceof TLRPC.User) {
+                return ((TLRPC.User) headerIdentityTarget).id;
+            }
+            return 0;
+        }
+        private long getSubtitleThreadId() {
+            return parentFragment != null ? parentFragment.getThreadId() : 0;
+        }
+        boolean hasPresentedIdentity() {
+            return hasPresentedSubtitle && presentedAccount == currentAccount
+                    && presentedDialogId != 0
+                    && presentedDialogId == getSubtitleDialogId()
+                    && presentedThreadId == getSubtitleThreadId();
+        }
+
+        boolean isPresentationVisible() {
+            if (NimarkoUiAnimationClock.isPaused() || !isLaidOut() || !isAttachedToWindow()
+                    || !hasWindowFocus() || !isShown() || getWindowVisibility() != VISIBLE) return false;
+            for (View view = this; view != null;
+                    view = view.getParent() instanceof View ? (View) view.getParent() : null) {
+                if (view.getVisibility() != VISIBLE || view.getAlpha() <= 0f) return false;
+            }
+            return true;
+        }
+
+        boolean canRetainSubtitle() {
+            return SharedConfig.animationsEnabled() && hasPresentedIdentity()
+                    && isAttachedToWindow() && isLaidOut()
+                    && titleAnimation == null && !subtitleHiddenByPreference
+                    && !app.nimarkogram.messenger.NimarkoConfig.hideActionBarStatus
+                    && (outgoing == null || fadeCentered == centerChatTitle);
+        }
+        void resetPresentation() {
+            hasPresentedSubtitle = false;
+            pendingReveal = false;
+            presentedProgress = 1f;
+            presentedGlassWidth = Float.NaN;
+        }
+
+        private float snapshotGlassWidth() {
+            if (pendingReveal && outgoing != null) return subtitleWidthTransitionStart;
+            if (outgoing != null && !Float.isNaN(presentedGlassWidth)) return presentedGlassWidth;
+            return currentSubtitleTransitionWidth();
+        }
+
+        void deferCrossfade() {
+            if (!canRetainSubtitle()) {
+                finishCrossfade();
+                resetPresentation();
+                return;
+            }
+            if (pendingReveal && outgoing != null) return;
+            final float startWidth = snapshotGlassWidth();
+            final float previousWidth = outgoing != null && presentedProgress == 0f
+                    ? inlineSubtitleWidthReserve : Math.max(inlineSubtitleWidthReserve,
+                            getTextWidth() + getSideDrawablesSize());
+            captureSubtitle();
+            if (outgoing != null) {
+                subtitleWidthTransitionStart = startWidth;
+                inlineSubtitleWidthReserve = centerChatTitle ? previousWidth : 0f;
+                subtitleTransitionRunning = true;
+                pendingReveal = true;
+                requestLayout();
+                checkActionBar(true);
+            }
+        }
+
+        @Override
+        protected void onWindowVisibilityChanged(int visibility) {
+            super.onWindowVisibilityChanged(visibility);
+            if (visibility != VISIBLE && crossfade != null) {
+                deferCrossfade();
+            }
+        }
+        @Override
+        public void onWindowFocusChanged(boolean hasFocus) {
+            super.onWindowFocusChanged(hasFocus);
+            if (!hasFocus && crossfade != null) {
+                deferCrossfade();
+            } else if (hasFocus && pendingReveal) {
+                invalidate();
+            }
+        }
+        void captureSubtitle() {
+            if (outgoing != null && presentedProgress == 0f) {
+
+
+                stopCrossfadeAnimator();
+                progress = 0f;
+                return;
+            }
+            Bitmap snapshot = null;
+            try {
+                if (getWidth() <= 0 || getHeight() <= 0 || !isAttachedToWindow()) {
+                    finishCrossfade();
+                    resetPresentation();
+                    return;
+                }
+                final int width = Math.max(getWidth(), outgoing != null ? outgoing.getWidth() : 0);
+                final int height = Math.max(getHeight(), outgoing != null ? outgoing.getHeight() : 0);
+                snapshot = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
+                final Canvas snapshotCanvas = new Canvas(snapshot);
+                if (centerChatTitle) {
+                    snapshotCanvas.translate((width - getWidth()) / 2f, 0);
+                }
+                capturingSubtitle = true;
+                progress = presentedProgress;
+                try {
+                    draw(snapshotCanvas);
+                } finally {
+                    capturingSubtitle = false;
+                }
+            } catch (RuntimeException | OutOfMemoryError error) {
+                finishCrossfade();
+                resetPresentation();
+                return;
+            }
+            stopCrossfadeAnimator();
+            outgoing = snapshot;
+            fadeCentered = centerChatTitle;
+            progress = presentedProgress = 0f;
+        }
+
+        void startCrossfade() {
+            if (outgoing == null || !canRetainSubtitle()) {
+                finishCrossfade();
+                return;
+            }
+            if (crossfade != null) return;
+            if (!isPresentationVisible()) {
+                pendingReveal = true;
+                return;
+            }
+            pendingReveal = false;
+            subtitleTransitionRunning = true;
+            progress = 0f;
+            final int generation = ++subtitleTransitionGeneration;
+            crossfade = ValueAnimator.ofFloat(0f, 1f);
+            crossfade.setDuration(300);
+            crossfade.setInterpolator(CubicBezierInterpolator.EASE_OUT);
+            crossfade.addUpdateListener(animation -> {
+                if (crossfade != animation || generation != subtitleTransitionGeneration) return;
+                if (!canRetainSubtitle()) {
+                    finishCrossfade();
+                    resetPresentation();
+                    return;
+                }
+                if (!isPresentationVisible()) {
+                    deferCrossfade();
+                    return;
+                }
+                progress = (float) animation.getAnimatedValue();
+                invalidate();
+                checkActionBar(true);
+            });
+            crossfade.addListener(new AnimatorListenerAdapter() {
+                @Override
+                public void onAnimationEnd(Animator animation) {
+                    if (crossfade != animation || generation != subtitleTransitionGeneration) return;
+                    finishCrossfade();
+                }
+            });
+            crossfade.start();
+            NimarkoUiAnimationClock.track(crossfade);
+        }
+        private void stopCrossfadeAnimator() {
+            subtitleTransitionGeneration++;
+            if (crossfade != null) {
+                crossfade.removeAllListeners();
+                crossfade.removeAllUpdateListeners();
+                crossfade.cancel();
+                crossfade = null;
+            }
+        }
+
+        void finishCrossfade() {
+            final boolean changed = outgoing != null || crossfade != null || subtitleTransitionRunning;
+            stopCrossfadeAnimator();
+            outgoing = null;
+            progress = presentedProgress = 1f;
+            pendingReveal = false;
+            subtitleTransitionRunning = false;
+            inlineSubtitleWidthReserve = 0f;
+            subtitleWidthTransitionStart = 0f;
+            invalidate();
+            if (changed) {
+                requestLayout();
+                checkActionBar(true);
+            }
+        }
+
+        @Override
+        protected void onDetachedFromWindow() {
+            finishCrossfade();
+            resetPresentation();
+            super.onDetachedFromWindow();
+        }
+        @Override
+        protected void onDraw(Canvas canvas) {
+            if (!capturingSubtitle && hasPresentedSubtitle && !canRetainSubtitle()) {
+                if (!hasPresentedIdentity()) subtitleScrollingState = null;
+                finishCrossfade();
+                resetPresentation();
+            }
+            if (!capturingSubtitle && canvas.isHardwareAccelerated() && isPresentationVisible()) {
+                if (pendingReveal) {
+                    startCrossfade();
+                }
+                hasPresentedSubtitle = getSubtitleDialogId() != 0;
+                presentedAccount = currentAccount;
+                presentedDialogId = getSubtitleDialogId();
+                presentedThreadId = getSubtitleThreadId();
+                presentedProgress = progress;
+                presentedGlassWidth = hasPresentedSubtitle ? currentSubtitleTransitionWidth() : Float.NaN;
+            }
+            if (progress == 1f) {
+                super.onDraw(canvas);
+                return;
+            }
+            final float outgoingX = outgoing != null && centerChatTitle
+                    ? (getWidth() - outgoing.getWidth()) / 2f : 0f;
+            final int incomingAlpha = Math.round(255 * progress);
+            if (incomingAlpha == 0) {
+                if (outgoing != null) {
+                    fadePaint.setAlpha(255);
+                    canvas.drawBitmap(outgoing, outgoingX, 0, fadePaint);
+                }
+                return;
+            }
+            final float left = Math.min(0f, outgoingX);
+            final float right = Math.max(getWidth(), outgoing != null ? outgoingX + outgoing.getWidth() : 0f);
+            final float bottom = Math.max(getHeight(), outgoing != null ? outgoing.getHeight() : 0);
+            final int layer = canvas.saveLayer(left, 0, right, bottom, null);
+            try {
+                if (outgoing != null) {
+                    fadePaint.setAlpha(255 - incomingAlpha);
+                    canvas.drawBitmap(outgoing, outgoingX, 0, fadePaint);
+                }
+                incomingPaint.setAlpha(incomingAlpha);
+                final int save = canvas.saveLayer(0, 0, getWidth(), getHeight(), incomingPaint);
+                try {
+                    super.onDraw(canvas);
+                } finally {
+                    canvas.restoreToCount(save);
+                }
+            } finally {
+                canvas.restoreToCount(layer);
+            }
+        }
+    }
+
+    public ChatAvatarContainer(Context context, BaseFragment baseFragment, boolean needTime) {
+        this(context, baseFragment, needTime, null);
+    }
+
+    public ChatAvatarContainer(Context context, BaseFragment baseFragment, boolean needTime, Theme.ResourcesProvider resourcesProvider) {
+        super(context);
+        this.resourcesProvider = resourcesProvider;
+        currentAccount = baseFragment != null ? baseFragment.getCurrentAccount() : UserConfig.selectedAccount;
+        if (baseFragment instanceof ChatActivity) {
+            parentFragment = (ChatActivity) baseFragment;
+        } else if (baseFragment instanceof TopicsFragment
+                || baseFragment instanceof DialogsActivity && ((DialogsActivity) baseFragment).isCommunityDialogList()) {
+            useChatTitleLayoutOutsideChat = true;
+        }
+
+        final boolean avatarClickable = parentFragment != null && (parentFragment.getChatMode() == 0 || parentFragment.getChatMode() == ChatActivity.MODE_SUGGESTIONS) && !UserObject.isReplyUser(parentFragment.getCurrentUser()) && (parentFragment.getCurrentUser() == null || parentFragment.getCurrentUser().id != UserObject.VERIFY);
+        avatarImageView = new BackupImageView(context) {
+
+            StoriesUtilities.AvatarStoryParams params = new StoriesUtilities.AvatarStoryParams(true) {
+                @Override
+                public void openStory(long dialogId, Runnable onDone) {
+                    baseFragment.getOrCreateStoryViewer().open(getContext(), dialogId, (dialogId1, messageId, storyId, type, holder) -> {
+                        holder.crossfadeToAvatarImage = holder.storyImage = imageReceiver;
+                        holder.params = params;
+                        holder.isLive = params.drawnLive;
+                        holder.view = avatarImageView;
+                        holder.alpha = avatarImageView.getAlpha();
+                        holder.clipTop = 0;
+                        holder.clipBottom = AndroidUtilities.displaySize.y;
+                        holder.clipParent = (View) getParent();
+                        return true;
+                    });
+                }
+            };
+
+            @Override
+            public void onInitializeAccessibilityNodeInfo(AccessibilityNodeInfo info) {
+                super.onInitializeAccessibilityNodeInfo(info);
+                if (avatarClickable && getImageReceiver().hasNotThumb()) {
+                    info.setText(getString(R.string.AccDescrProfilePicture));
+                    info.addAction(new AccessibilityNodeInfo.AccessibilityAction(AccessibilityNodeInfo.ACTION_CLICK, getString(R.string.Open)));
+                } else {
+                    info.setVisibleToUser(false);
+                }
+            }
+
+            @Override
+            protected void onDraw(Canvas canvas) {
+                if (allowDrawStories && animatedEmojiDrawable == null) {
+                    params.originalAvatarRect.set(0, 0, getMeasuredWidth(), getMeasuredHeight());
+                    params.drawSegments = true;
+                    params.drawInside = true;
+                    params.resourcesProvider = resourcesProvider;
+                    if (storiesForceState != null) {
+                        params.forceState = storiesForceState;
+                    }
+
+                    long dialogId = 0;
+                    if (parentFragment != null) {
+                        dialogId = parentFragment.getDialogId();
+                    } else if (baseFragment instanceof TopicsFragment) {
+                        dialogId = ((TopicsFragment) baseFragment).getDialogId();
+                    }
+
+                    StoriesUtilities.drawAvatarWithStory(dialogId, canvas, imageReceiver, params);
+                } else {
+                    super.onDraw(canvas);
+                }
+            }
+
+            @Override
+            public boolean onTouchEvent(MotionEvent event) {
+                if (allowDrawStories) {
+                    if (params.checkOnTouchEvent(event, this)) {
+                        return true;
+                    }
+                }
+                return super.onTouchEvent(event);
+            }
+        };
+        if (baseFragment instanceof ChatActivity || baseFragment instanceof TopicsFragment) {
+            if (parentFragment == null || (parentFragment.getChatMode() != ChatActivity.MODE_QUICK_REPLIES && parentFragment.getChatMode() != ChatActivity.MODE_WELCOME_MESSAGES && parentFragment.getChatMode() != ChatActivity.MODE_EDIT_BUSINESS_LINK) && parentFragment.getChatMode() != ChatActivity.MODE_SUGGESTIONS && !parentFragment.isInBotForumMode()) {
+                sharedMediaPreloader = new SharedMediaLayout.SharedMediaPreloader(baseFragment);
+            }
+            avatarImageIsHidden = parentFragment != null && (
+                parentFragment.isThreadChat() && !parentFragment.isReplyChatComment() ||
+                parentFragment.getChatMode() == ChatActivity.MODE_PINNED ||
+                parentFragment.getChatMode() == ChatActivity.MODE_QUICK_REPLIES ||
+                parentFragment.getChatMode() == ChatActivity.MODE_WELCOME_MESSAGES ||
+                parentFragment.getChatMode() == ChatActivity.MODE_EDIT_BUSINESS_LINK
+            );
+            if (avatarImageIsHidden) {
+                avatarImageView.setVisibility(GONE);
+            }
+        }
+        avatarImageView.setContentDescription(getString(R.string.AccDescrProfilePicture));
+        avatarImageView.setRoundRadius(AndroidUtilities.dp(21));   // Chat header keeps Telegram's own shape.
+        addView(avatarImageView);
+
+        centerChatTitle = resolveCenterChatTitle();
+
+        if (avatarClickable && !centerChatTitle) {
+            final TLRPC.Chat chat = parentFragment != null ? parentFragment.getCurrentChat() : null;
+            if (chat != null && chat.linked_community_id != 0) {
+                ScaleStateListAnimator.apply(avatarImageView, .05f, 1.2f);
+            }
+            avatarImageView.setOnClickListener(v -> openProfile(true));
+        }
+
+        titleTextView = new TitleTextView(context);
+        titleTextView.setEllipsizeByGradient(
+                true, useChatTitleLayoutOutsideChat ? LocaleController.isRTL : null);
+        titleTextView.setTextColor(getThemedColor(Theme.key_actionBarDefaultTitle));
+        titleTextView.setTextSize(18);
+        titleTextView.setGravity(centerChatTitle ? Gravity.CENTER_HORIZONTAL : Gravity.LEFT);
+        titleTextView.setTypeface(AndroidUtilities.bold());
+        titleTextView.setLeftDrawableTopPadding(-dp(1.3f));
+        titleTextView.setCanHideRightDrawable(false);
+        titleTextView.setRightDrawableOutside(true);
+        titleTextView.setOutsideRightDrawableTextClipInset(0);
+        titleTextView.setPadding(0, dp(6), 0, dp(12));
+        titleTextView.setScrollNonFitText(true);
+        addView(titleTextView);
+
+        if (useAnimatedSubtitle()) {
+            animatedSubtitleTextView = new AnimatedTextView(context, true, true, true);
+            animatedSubtitleTextView.setAnimationProperties(.3f, 0, 320, CubicBezierInterpolator.EASE_OUT_QUINT);
+            animatedSubtitleTextView.setEllipsizeByGradient(true);
+            animatedSubtitleTextView.setTextColor(getThemedColor(Theme.key_actionBarDefaultSubtitle));
+            animatedSubtitleTextView.setTag(Theme.key_actionBarDefaultSubtitle);
+            animatedSubtitleTextView.setTextSize(dp(14));
+            animatedSubtitleTextView.setGravity(centerChatTitle ? Gravity.CENTER_HORIZONTAL : Gravity.LEFT);
+            animatedSubtitleTextView.setPadding(centerChatTitle ? dp(10) : 0, 0, dp(10), 0);
+            animatedSubtitleTextView.setTranslationY(-dp(1));
+            addView(animatedSubtitleTextView);
+        } else {
+            subtitleTextView = new SubtitleTextView(context);
+            subtitleTextView.setEllipsizeByGradient(
+                    true,
+                    useChatTitleLayoutOutsideChat ? LocaleController.isRTL : null);
+            subtitleTextView.setTextColor(getThemedColor(Theme.key_actionBarDefaultSubtitle));
+            subtitleTextView.setTag(Theme.key_actionBarDefaultSubtitle);
+            subtitleTextView.setTextSize(14);
+            subtitleTextView.setGravity(centerChatTitle ? Gravity.CENTER_HORIZONTAL : Gravity.LEFT);
+            subtitleTextView.setPadding(centerChatTitle ? dp(10) : 0, 0, dp(10), 0);
+            subtitleTextView.setScrollNonFitText(false);
+            addView(subtitleTextView);
+        }
+
+        if (parentFragment != null) {
+            communityItem = new ImageView(context);
+            communityItem.setScaleType(ImageView.ScaleType.CENTER);
+            communityItem.setVisibility(GONE);
+            communityItem.setImageDrawable(communityArrowDrawable = new CommunityArrowDrawable());
+            communityItem.setContentDescription(getString(R.string.CommunitySectionChatsYouCanView));
+            communityItem.setOnClickListener(v -> {
+                if (!onCommunityClick()) {
+                    openProfile(false);
+                }
+            });
+            ScaleStateListAnimator.apply(communityItem, .06f, 1.2f);
+            addView(communityItem);
+
+            timeItem = new ImageView(context);
+            timeItem.setPadding(centerChatTitle ? dp(5) : 10, dp(10), centerChatTitle ? dp(20) : 5, dp(5));
+            timeItem.setScaleType(ImageView.ScaleType.CENTER);
+            timeItem.setVisibility(GONE);
+            timeItem.setImageDrawable(timerDrawable = new TimerDrawable(context, resourcesProvider));
+            timerDrawable.setBackgroundColor(0);
+            addView(timeItem);
+            secretChatTimer = needTime;
+
+            timeItem.setOnClickListener(v -> {
+                if (secretChatTimer) {
+                    parentFragment.showDialog(AlertsCreator.createTTLAlert(getContext(), parentFragment.getCurrentEncryptedChat(), resourcesProvider).create());
+                } else {
+                    openSetTimer();
+                }
+            });
+            if (secretChatTimer) {
+                timeItem.setContentDescription(getString(R.string.SetTimer));
+            } else {
+                timeItem.setContentDescription(getString(R.string.AccAutoDeleteTimer));
+            }
+
+            starBgItem = new ImageView(context);
+            starBgItem.setImageResource(R.drawable.star_small_outline);
+            starBgItem.setColorFilter(new PorterDuffColorFilter(getThemedColor(Theme.key_actionBarDefault), PorterDuff.Mode.SRC_IN));
+            starBgItem.setAlpha(0.0f);
+            starBgItem.setVisibility(View.INVISIBLE);
+            starBgItem.setScaleY(0.0f);
+            starBgItem.setScaleX(0.0f);
+            addView(starBgItem);
+
+            starFgItem = new ImageView(context);
+            starFgItem.setImageResource(R.drawable.star_small_inner);
+            starFgItem.setAlpha(0.0f);
+            starFgItem.setVisibility(View.INVISIBLE);
+            starFgItem.setScaleY(0.0f);
+            starFgItem.setScaleX(0.0f);
+            addView(starFgItem);
+        }
+
+        if (parentFragment != null && (parentFragment.getChatMode() == 0 || parentFragment.getChatMode() == ChatActivity.MODE_SUGGESTIONS || parentFragment.getChatMode() == ChatActivity.MODE_SAVED)) {
+            if ((!parentFragment.isThreadChat() || parentFragment.isTopic || parentFragment.isComments) && !UserObject.isReplyUser(parentFragment.getCurrentUser()) && (parentFragment.getCurrentUser() == null || parentFragment.getCurrentUser().id != UserObject.VERIFY)) {
+                setOnClickListener(v -> openProfile(false));
+            }
+
+            TLRPC.Chat chat = parentFragment.getCurrentChat();
+            statusDrawables[0] = new TypingDotsDrawable(true);
+            statusDrawables[1] = new RecordStatusDrawable(true);
+            statusDrawables[2] = new SendingFileDrawable(true);
+            statusDrawables[3] = new PlayingGameDrawable(false, resourcesProvider);
+            statusDrawables[4] = new RoundStatusDrawable(true);
+            statusDrawables[5] = new ChoosingStickerStatusDrawable(true);
+            ((RecordStatusDrawable) statusDrawables[1]).setUseCenteredOverride(true);
+            ((SendingFileDrawable) statusDrawables[2]).setUseCenteredOverride(true);
+            ((PlayingGameDrawable) statusDrawables[3]).setUseCenteredOverride(true);
+            ((RoundStatusDrawable) statusDrawables[4]).setUseCenteredOverride(true);
+            for (int a = 0; a < statusDrawables.length; a++) {
+                statusDrawables[a].setIsChat(chat != null);
+            }
+        }
+
+        emojiStatusDrawable = new AnimatedEmojiDrawable.SwapAnimatedEmojiDrawable(titleTextView, dp(24));
+        emojiStatusDrawable.setCurrentAccount(baseFragment != null ? baseFragment.getCurrentAccount() : currentAccount);
+        botVerificationDrawable = new AnimatedEmojiDrawable.SwapAnimatedEmojiDrawable(titleTextView, dp(17));
+        botVerificationDrawable.setCurrentAccount(baseFragment != null ? baseFragment.getCurrentAccount() : currentAccount);
+    }
+
+    public ButtonBounce bounce = new ButtonBounce(this);
+    private Runnable onLongClick = () -> {
+        pressed = false;
+        bounce.setPressed(false);
+        if (canSearch()) {
+            if (!app.nimarkogram.messenger.NimarkoConfig.disableVibration) {
+                try {
+                    performHapticFeedback(android.view.HapticFeedbackConstants.KEYBOARD_TAP, android.view.HapticFeedbackConstants.FLAG_IGNORE_GLOBAL_SETTING);
+                } catch (Exception ignored) {}
+            }
+            app.nimarkogram.messenger.NimarkoConfig.setMessagesSearchFilter(app.nimarkogram.messenger.NimarkoConfig.FILTER_NONE);
+            openSearch();
+        }
+    };
+
+    private boolean pressed;
+    @Override
+    public boolean onTouchEvent(MotionEvent ev) {
+        if (ev.getAction() == MotionEvent.ACTION_DOWN && canSearch()) {
+            pressed = true;
+            bounce.setPressed(!centerChatTitle);
+            AndroidUtilities.cancelRunOnUIThread(this.onLongClick);
+            AndroidUtilities.runOnUIThread(this.onLongClick, ViewConfiguration.getLongPressTimeout());
+            return true;
+        } else if (ev.getAction() == MotionEvent.ACTION_UP || ev.getAction() == MotionEvent.ACTION_CANCEL) {
+            if (pressed) {
+                bounce.setPressed(false);
+                pressed = false;
+                AndroidUtilities.cancelRunOnUIThread(this.onLongClick);
+                if (ev.getAction() == MotionEvent.ACTION_UP && isClickable()) {
+                    performClick();
+                }
+                return true;
+            }
+        }
+        return super.onTouchEvent(ev);
+    }
+
+    @Override
+    public void setPressed(boolean pressed) {
+        super.setPressed(pressed);
+        bounce.setPressed(pressed);
+    }
+
+    @Override
+    protected void dispatchDraw(Canvas canvas) {
+        canvas.save();
+        final float s = bounce.getScale(.02f);
+        canvas.scale(s, s, getPivotX(), getHeight() - ActionBar.getCurrentActionBarHeight() / 2f);
+        super.dispatchDraw(canvas);
+        canvas.restore();
+    }
+    public void drawProfileTransitionText(Canvas canvas, View title, View subtitle) {
+        drawProfileTransitionText(canvas, title, subtitle, true);
+    }
+
+    public void drawProfileTransitionText(Canvas canvas, View title, View subtitle, boolean drawCommunity) {
+        final int save = canvas.save();
+        final float s = bounce.getScale(.02f);
+        canvas.scale(s, s, getPivotX(), getHeight() - ActionBar.getCurrentActionBarHeight() / 2f);
+        if (title == titleTextView && title.getVisibility() == VISIBLE) {
+            drawChild(canvas, title, getDrawingTime());
+            if (drawCommunity && shouldUseInlineCommunityIndicator()) {
+                drawChild(canvas, communityItem, getDrawingTime());
+            }
+        }
+        if (subtitle != null && subtitle == getSubtitleTextView() && subtitle.getVisibility() == VISIBLE) {
+            drawChild(canvas, subtitle, getDrawingTime());
+        }
+        canvas.restoreToCount(save);
+    }
+
+    public void drawProfileTransitionCommunity(Canvas canvas) {
+        if (!shouldUseInlineCommunityIndicator() || communityItem == null || communityItem.getVisibility() != VISIBLE) {
+            return;
+        }
+        final int save = canvas.save();
+        final float s = bounce.getScale(.02f);
+        canvas.scale(s, s, getPivotX(), getHeight() - ActionBar.getCurrentActionBarHeight() / 2f);
+        drawChild(canvas, communityItem, getDrawingTime());
+        canvas.restoreToCount(save);
+    }
+
+    @Override
+    protected boolean drawChild(@NonNull Canvas canvas, View child, long drawingTime) {
+        if (inlineTextClipEnabled
+                && (child == titleTextView
+                || child == subtitleTextView
+                || child == animatedSubtitleTextView
+                || child == titleTextLargerCopyView.get()
+                || child == subtitleTextLargerCopyView.get())) {
+            final int save = canvas.save();
+            canvas.clipRect(inlineTextClipLeft, 0, inlineTextClipRight, getHeight());
+            final boolean drawn = super.drawChild(canvas, child, drawingTime);
+            canvas.restoreToCount(save);
+            return drawn;
+        }
+        if (child == avatarImageView) {
+            final boolean hasCommunity = communityItem != null
+                    && communityItem.getVisibility() == VISIBLE
+                    && !shouldUseInlineCommunityIndicator();
+            if (hasCommunity) {
+                AndroidUtilities.rectTmp.set(child.getX(), child.getY(), child.getX() + child.getWidth(), child.getY() + child.getHeight());
+                AndroidUtilities.rectTmp.inset(-dp(3), -dp(3));
+                canvas.saveLayer(AndroidUtilities.rectTmp, null);
+                final boolean b = super.drawChild(canvas, child, drawingTime);
+                if (hasCommunity) {
+                    final float cx = communityItem.getX() + communityItem.getWidth() / 2f;
+                    final float cy = communityItem.getY() + communityItem.getHeight() / 2f;
+                    final float r = dpf2(7.66f) * communityItem.getScaleX();
+                    canvas.drawCircle(cx, cy, r, Theme.PAINT_CLEAR);
+                }
+                canvas.restore();
+                return b;
+            }
+        }
+        return super.drawChild(canvas, child, drawingTime);
+    }
+
+    public boolean ignoreTouches;
+    @Override
+    public boolean dispatchTouchEvent(MotionEvent ev) {
+        if (ignoreTouches) return false;
+        return super.dispatchTouchEvent(ev);
+    }
+
+    protected boolean canSearch() {
+        return false;
+    }
+
+    protected void openSearch() {
+
+    }
+
+    protected boolean onCommunityClick() {
+        return false;
+    }
+
+    public boolean shouldUseInlineCommunityIndicator() {
+        return centerChatTitle
+                && !isInlineCenteredAvatar()
+                && communityItem != null
+                && communityItem.getVisibility() == VISIBLE;
+    }
+
+    private int getInlineCommunityIndicatorSpace() {
+        return shouldUseInlineCommunityIndicator()
+                ? dp(INLINE_COMMUNITY_GAP_DP + INLINE_COMMUNITY_TOUCH_SIZE_DP)
+                : 0;
+    }
+
+    private int getInlineCommunityIndicatorVisualAdvance() {
+        if (!shouldUseInlineCommunityIndicator()) {
+            return 0;
+        }
+        final int visualWidth = communityArrowDrawable != null
+                ? communityArrowDrawable.getInlineVisualWidth()
+                : dp(20);
+        return Math.round(
+                dp(INLINE_COMMUNITY_GAP_DP)
+                        + (dp(INLINE_COMMUNITY_TOUCH_SIZE_DP) + visualWidth) / 2f);
+    }
+
+    private void updateCommunityIndicatorStyle() {
+        if (communityArrowDrawable == null) {
+            return;
+        }
+        communityArrowDrawable
+                .setInline(shouldUseInlineCommunityIndicator())
+                .setInlineColor(titleTextView != null
+                        ? titleTextView.getTextPaint().getColor()
+                        : getThemedColor(Theme.key_actionBarDefaultTitle));
+        if (communityItem != null) {
+            communityItem.invalidate();
+        }
+    }
+
+    public void setTitleExpand(boolean titleExpand) {
+        int newRightPadding = titleExpand ? dp(10) : 0;
+        if (titleTextView.getPaddingRight() != newRightPadding) {
+            titleTextView.setPadding(0, dp(6), newRightPadding, dp(12));
+            requestLayout();
+            invalidate();
+        }
+    }
+
+    public void setOverrideSubtitleColor(Integer overrideSubtitleColor) {
+        this.overrideSubtitleColor = overrideSubtitleColor;
+    }
+
+    public boolean openSetTimer() {
+        if (parentFragment.getParentActivity() == null) {
+            return false;
+        }
+        TLRPC.Chat chat = parentFragment.getCurrentChat();
+        if (chat != null && !ChatObject.canUserDoAdminAction(chat, ChatObject.ACTION_DELETE_MESSAGES)) {
+            if (animatorTimeVisible.getValue()) {
+                parentFragment.showTimerHint();
+            }
+            return false;
+        }
+        TLRPC.ChatFull chatInfo = parentFragment.getCurrentChatInfo();
+        TLRPC.UserFull userInfo = parentFragment.getCurrentUserInfo();
+        int ttl = 0;
+        if (userInfo != null) {
+            ttl = userInfo.ttl_period;
+        } else if (chatInfo != null) {
+            ttl = chatInfo.ttl_period;
+        }
+
+        ActionBarPopupWindow[] scrimPopupWindow = new ActionBarPopupWindow[1];
+        AutoDeletePopupWrapper autoDeletePopupWrapper = new AutoDeletePopupWrapper(getContext(), null, new AutoDeletePopupWrapper.Callback() {
+            @Override
+            public void dismiss() {
+                if (scrimPopupWindow[0] != null) {
+                    scrimPopupWindow[0].dismiss();
+                }
+            }
+
+            @Override
+            public void setAutoDeleteHistory(int time, int action) {
+                if (parentFragment == null) {
+                    return;
+                }
+                parentFragment.getMessagesController().setDialogHistoryTTL(parentFragment.getDialogId(), time);
+                TLRPC.ChatFull chatInfo = parentFragment.getCurrentChatInfo();
+                TLRPC.UserFull userInfo = parentFragment.getCurrentUserInfo();
+                if (userInfo != null || chatInfo != null) {
+                    UndoView undoView = parentFragment.getUndoView();
+                    if (undoView != null) {
+                        undoView.showWithAction(parentFragment.getDialogId(), action, parentFragment.getCurrentUser(), userInfo != null ? userInfo.ttl_period : chatInfo.ttl_period, null, null);
+                    }
+                }
+
+            }
+        }, true, 0, resourcesProvider);
+        autoDeletePopupWrapper.updateItems(ttl);
+
+        scrimPopupWindow[0] = new ActionBarPopupWindow(autoDeletePopupWrapper.windowLayout, LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT) {
+            @Override
+            public void dismiss() {
+                super.dismiss();
+                if (parentFragment != null) {
+                    parentFragment.dimBehindView(false);
+                }
+            }
+        };
+        scrimPopupWindow[0].setPauseNotifications(true);
+        scrimPopupWindow[0].setDismissAnimationDuration(220);
+        scrimPopupWindow[0].setOutsideTouchable(true);
+        scrimPopupWindow[0].setClippingEnabled(true);
+        scrimPopupWindow[0].setAnimationStyle(R.style.PopupContextAnimation);
+        scrimPopupWindow[0].setFocusable(true);
+        autoDeletePopupWrapper.windowLayout.measure(View.MeasureSpec.makeMeasureSpec(dp(1000), View.MeasureSpec.AT_MOST), View.MeasureSpec.makeMeasureSpec(dp(1000), View.MeasureSpec.AT_MOST));
+        scrimPopupWindow[0].setInputMethodMode(ActionBarPopupWindow.INPUT_METHOD_NOT_NEEDED);
+        scrimPopupWindow[0].getContentView().setFocusableInTouchMode(true);
+        scrimPopupWindow[0].showAtLocation(avatarImageView, 0, (int) (avatarImageView.getX() + getX()), (int) avatarImageView.getY());
+        parentFragment.dimBehindView(true);
+        return true;
+    }
+
+    public void openProfile(boolean byAvatar) {
+        openProfile(byAvatar, true, false);
+    }
+
+    public void openProfile(boolean byAvatar, boolean fromChatAnimation, boolean removeLast) {
+        if (byAvatar && (AndroidUtilities.isTablet() || AndroidUtilities.displaySize.x > AndroidUtilities.displaySize.y || !avatarImageView.getImageReceiver().hasNotThumb())) {
+            byAvatar = false;
+        }
+        TLRPC.User user = parentFragment.getCurrentUser();
+        TLRPC.Chat chat = parentFragment.getCurrentChat();
+        final boolean monoforum = chat != null && chat.monoforum;
+        if (chat != null && chat.monoforum) {
+            TLRPC.Chat channel = parentFragment.getMessagesController().getChat(chat.linked_monoforum_id);
+            if (channel == null) return;
+            chat = channel;
+            if (parentFragment.getSendMonoForumPeerId() != 0) {
+                TLRPC.User fromUser = parentFragment.getMessagesController().getUser(parentFragment.getSendMonoForumPeerId());
+                if (fromUser != null) {
+                    user = fromUser;
+                    chat = null;
+                }
+            }
+        }
+        ImageReceiver imageReceiver = avatarImageView.getImageReceiver();
+        String key = imageReceiver.getImageKey();
+        ImageLoader imageLoader = ImageLoader.getInstance();
+        if (key != null && !imageLoader.isInMemCache(key, false)) {
+            Drawable drawable = imageReceiver.getDrawable();
+            if (drawable instanceof BitmapDrawable && !(drawable instanceof AnimatedFileDrawable)) {
+                imageLoader.putImageToCache((BitmapDrawable) drawable, key, false);
+            }
+        }
+
+        if (parentFragment.isComments) {
+            if (chat == null) return;
+            parentFragment.presentFragment(ProfileActivity.of(-chat.id), removeLast);
+            return;
+        }
+
+        if (user != null) {
+            if (user.id == UserObject.VERIFY) {
+                return;
+            }
+            Bundle args = new Bundle();
+            if (UserObject.isUserSelf(user)) {
+                if (!sharedMediaPreloader.hasSharedMedia()) {
+                    return;
+                }
+                args.putLong("dialog_id", parentFragment.getDialogId());
+                if (parentFragment.getChatMode() == ChatActivity.MODE_SAVED) {
+                    args.putLong("topic_id", parentFragment.getSavedDialogId());
+                }
+                MediaActivity fragment = new MediaActivity(args, sharedMediaPreloader);
+                fragment.setChatInfo(parentFragment.getCurrentChatInfo());
+                parentFragment.presentFragment(fragment, removeLast);
+            } else {
+                if (parentFragment.getChatMode() == ChatActivity.MODE_SAVED) {
+                    long dialogId = parentFragment.getSavedDialogId();
+                    args.putBoolean("saved", true);
+                    if (dialogId >= 0) {
+                        args.putLong("user_id", dialogId);
+                    } else {
+                        args.putLong("chat_id", -dialogId);
+                    }
+                } else {
+                    args.putLong("user_id", user.id);
+                    if (timeItem != null && !monoforum) {
+                        args.putLong("dialog_id", parentFragment.getDialogId());
+                    }
+                }
+                if (UserObject.isBotForum(user)) {
+                    args.putLong("topic_id", parentFragment.getTopicId());
+                }
+                args.putBoolean("reportSpam", parentFragment.hasReportSpam());
+                args.putInt("actionBarColor", getThemedColor(Theme.key_actionBarDefault));
+                final ProfileActivity fragment = new ProfileActivity(args, sharedMediaPreloader);
+                if (!monoforum) {
+                    fragment.setUserInfo(parentFragment.getCurrentUserInfo(), parentFragment.profileChannelMessageFetcher, parentFragment.birthdayAssetsFetcher);
+                }
+                if (fromChatAnimation) {
+                    fragment.setPlayProfileAnimation(byAvatar ? 2 : 1);
+                }
+                parentFragment.presentFragment(fragment, removeLast);
+            }
+        } else if (chat != null) {
+            Bundle args = new Bundle();
+            args.putLong("chat_id", chat.id);
+            if (parentFragment.getChatMode() == ChatActivity.MODE_SAVED) {
+                args.putLong("topic_id", parentFragment.getSavedDialogId());
+            } else if (parentFragment.isTopic) {
+                args.putLong("topic_id", parentFragment.getThreadMessage().getId());
+            }
+            final ProfileActivity fragment = new ProfileActivity(args, sharedMediaPreloader);
+            if (!monoforum) {
+                fragment.setChatInfo(parentFragment.getCurrentChatInfo());
+            }
+            if (fromChatAnimation) {
+                fragment.setPlayProfileAnimation(byAvatar ? 2 : 1);
+            }
+            parentFragment.presentFragment(fragment, removeLast);
+        }
+    }
+
+    public void setOccupyStatusBar(boolean value) {
+        occupyStatusBar = value;
+    }
+
+    public void setTitleColors(int title, int subtitle) {
+        titleTextView.setTextColor(title);
+        subtitleTextView.setTextColor(subtitle);
+        subtitleTextView.setTag(subtitle);
+        updateCommunityIndicatorStyle();
+    }
+
+    @Override
+    protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
+        updateCenterChatTitleState();
+
+        final boolean inlineCenteredAvatar = isInlineCenteredAvatar();
+        int padding = centerChatTitle && !inlineCenteredAvatar ? dp(40) : 0;
+        int width = MeasureSpec.getSize(widthMeasureSpec)
+                + (centerChatTitle ? padding + titleTextView.getPaddingRight() : 0);
+        int availableWidth = width - dp(((avatarImageView.getVisibility() == VISIBLE || centerChatTitle) ? 54 : 0) + 16);
+        if (glassMode && !centerChatTitle && !useChatTitleLayoutOutsideChat
+                && getParent() instanceof ActionBar) {
+            int contentRight = ((ActionBar) getParent()).getChatAvatarAnimatedContentRight(this);
+            if (contentRight >= 0) {
+                final int textLeft = leftPadding
+                        + dp(avatarImageView.getVisibility() == VISIBLE ? 49.66f : 12)
+                        + rightAvatarPadding;
+                availableWidth = Math.max(0, contentRight - textLeft - dp(10));
+            }
+        }
+        if (useChatTitleLayoutOutsideChat
+                && !inlineCenteredAvatar
+                && getParent() instanceof ActionBar) {
+            final int islandContentWidth =
+                    ((ActionBar) getParent()).getForumChatAvatarContentWidth();
+            if (islandContentWidth > 0) {
+                final int contentInsets = dp(
+                        (avatarImageView.getVisibility() == VISIBLE ? 54 : 0) + 16);
+                availableWidth = Math.min(
+                        availableWidth,
+                        Math.max(0, islandContentWidth - contentInsets));
+            }
+        }
+        int nmAvatarMeasure = centerChatTitle && !inlineCenteredAvatar
+                ? dp(36) : dp(avatarSizeInDp) - 2;
+        avatarImageView.measure(MeasureSpec.makeMeasureSpec(nmAvatarMeasure, MeasureSpec.EXACTLY), MeasureSpec.makeMeasureSpec(nmAvatarMeasure, MeasureSpec.EXACTLY));
+        final int centeredTitleReserve = centerChatTitle && !inlineCenteredAvatar ? dp(60) : 0;
+        final int inlineCommunityReserve = getInlineCommunityIndicatorSpace();
+        final int subtitleAvailableWidth = Math.max(0, availableWidth - centeredTitleReserve);
+        final int titleTrailingSafety = centerChatTitle && titleTextView.getRightDrawableOutside()
+                && titleTextView.getRightDrawablesWidth() > 0 ? dp(4) : 0;
+        final int titleAvailableWidth = Math.max(
+                0, subtitleAvailableWidth - inlineCommunityReserve - titleTrailingSafety);
+        int centeredTitleCapacity = titleAvailableWidth;
+        int inlineTextCapacity = titleAvailableWidth;
+        int centeredSubtitleCapacity = subtitleAvailableWidth;
+        if (centerChatTitle && getParent() instanceof ActionBar) {
+            final int compactContentWidth =
+                    ((ActionBar) getParent()).getChatAvatarCompactContentWidth();
+            int animatedTextCapacity = compactContentWidth - dp(4) * 2;
+            if (compactContentWidth > 0) {
+                final int subtitleContentWidth = animatedTextCapacity
+                        - (inlineCenteredAvatar ? avatarImageView.getMeasuredWidth() + dp(8) : 0);
+                centeredSubtitleCapacity = Math.min(
+                        centeredSubtitleCapacity, Math.max(0, subtitleContentWidth));
+            }
+            if (inlineCenteredAvatar) {
+                animatedTextCapacity -= avatarImageView.getMeasuredWidth() + dp(8);
+                if (animatedTextCapacity > 0) {
+                    inlineTextCapacity = Math.min(inlineTextCapacity, animatedTextCapacity);
+                    centeredTitleCapacity = Math.min(
+                            centeredTitleCapacity, inlineTextCapacity);
+                }
+            } else {
+                animatedTextCapacity -= inlineCommunityReserve;
+                if (animatedTextCapacity > 0) {
+                    centeredTitleCapacity = Math.min(
+                            centeredTitleCapacity, animatedTextCapacity);
+                }
+            }
+        }
+        final int titleHeight = dp(24 + 8)
+                + (centerChatTitle ? titleTextView.getPaddingRight() : 0);
+        titleTextView.measure(MeasureSpec.makeMeasureSpec(titleAvailableWidth, MeasureSpec.AT_MOST), MeasureSpec.makeMeasureSpec(titleHeight, MeasureSpec.AT_MOST));
+        if (centerChatTitle && titleTextView.getMeasuredWidth() > 0) {
+            final int exactTitleWidth = getCenteredTitleWidth(centeredTitleCapacity);
+            if (exactTitleWidth != titleTextView.getMeasuredWidth()) {
+                titleTextView.measure(
+                        MeasureSpec.makeMeasureSpec(exactTitleWidth, MeasureSpec.EXACTLY),
+                        MeasureSpec.makeMeasureSpec(titleHeight, MeasureSpec.AT_MOST));
+            }
+        }
+        if (subtitleTextView != null) {
+            subtitleTextView.measure(MeasureSpec.makeMeasureSpec(subtitleAvailableWidth, MeasureSpec.AT_MOST), MeasureSpec.makeMeasureSpec(dp(20), MeasureSpec.AT_MOST));
+            if (centerChatTitle && subtitleTextView.getVisibility() != GONE) {
+                final int exactSubtitleWidth = Math.max(1, Math.min(centeredSubtitleCapacity,
+                        (int) Math.ceil(Math.max(getInlineDesiredWidth(subtitleTextView),
+                                inlineSubtitleWidthReserve + subtitleTextView.getPaddingLeft()
+                                        + subtitleTextView.getPaddingRight()))));
+                if (exactSubtitleWidth != subtitleTextView.getMeasuredWidth()) {
+                    subtitleTextView.measure(
+                            MeasureSpec.makeMeasureSpec(exactSubtitleWidth, MeasureSpec.EXACTLY),
+                            MeasureSpec.makeMeasureSpec(dp(20), MeasureSpec.AT_MOST));
+                }
+            }
+        } else if (animatedSubtitleTextView != null) {
+            animatedSubtitleTextView.measure(MeasureSpec.makeMeasureSpec(subtitleAvailableWidth, MeasureSpec.EXACTLY), MeasureSpec.makeMeasureSpec(dp(20), MeasureSpec.AT_MOST));
+        }
+        if (communityItem != null) {
+            final int communityTouchSize = dp(shouldUseInlineCommunityIndicator()
+                    ? INLINE_COMMUNITY_TOUCH_SIZE_DP : COMMUNITY_BADGE_TOUCH_SIZE_DP);
+            communityItem.measure(
+                    MeasureSpec.makeMeasureSpec(communityTouchSize, MeasureSpec.EXACTLY),
+                    MeasureSpec.makeMeasureSpec(communityTouchSize, MeasureSpec.EXACTLY));
+        }
+        if (timeItem != null) {
+            timeItem.measure(MeasureSpec.makeMeasureSpec(dp(34), MeasureSpec.EXACTLY), MeasureSpec.makeMeasureSpec(dp(34), MeasureSpec.EXACTLY));
+        }
+        if (starBgItem != null) {
+            starBgItem.measure(MeasureSpec.makeMeasureSpec(dp(20), MeasureSpec.EXACTLY), MeasureSpec.makeMeasureSpec(dp(20), MeasureSpec.EXACTLY));
+        }
+        if (starFgItem != null) {
+            starFgItem.measure(MeasureSpec.makeMeasureSpec(dp(20), MeasureSpec.EXACTLY), MeasureSpec.makeMeasureSpec(dp(20), MeasureSpec.EXACTLY));
+        }
+        setMeasuredDimension(width, MeasureSpec.getSize(heightMeasureSpec));
+        if (lastWidth != -1 && lastWidth != width && lastWidth > width) {
+            fadeOutToLessWidth(lastWidth);
+        }
+        SimpleTextView titleTextLargerCopyView = this.titleTextLargerCopyView.get();
+        if (titleTextLargerCopyView != null) {
+            int largerAvailableWidth = largerWidth - dp((avatarImageView.getVisibility() == VISIBLE ? 54 : 0) + 16);
+            titleTextLargerCopyView.measure(MeasureSpec.makeMeasureSpec(largerAvailableWidth, MeasureSpec.AT_MOST), MeasureSpec.makeMeasureSpec(dp(24), MeasureSpec.AT_MOST));
+        }
+        lastWidth = width;
+    }
+
+    private int getCenteredTitleWidth(int capacity) {
+        float width = getInlineDesiredWidth(titleTextView);
+        if (titleTextView instanceof TitleTextView) {
+            width = Math.max(width, ((TitleTextView) titleTextView).nameCrossfade.getOutgoingWidth());
+        }
+        return Math.max(1, Math.min(capacity, (int) Math.ceil(width)));
+    }
+    private void fadeOutToLessWidth(int largerWidth) {
+        if (titleTextView instanceof TitleTextView
+                && ((TitleTextView) titleTextView).nameCrossfade.getProgress() < 1f) {
+            clearLargerTextCopies();
+            return;
+        }
+        updateCenterChatTitleState();
+
+        if (glassMode || centerChatTitle || useChatTitleLayoutOutsideChat) {
+            clearLargerTextCopies();
+            return;
+        }
+
+        this.largerWidth = largerWidth;
+        SimpleTextView titleTextLargerCopyView = this.titleTextLargerCopyView.get();
+        if (titleTextLargerCopyView != null) {
+            titleTextLargerCopyView.animate().cancel();
+            removeView(titleTextLargerCopyView);
+        }
+        titleTextLargerCopyView = new SimpleTextView(getContext());
+        titleTextLargerCopyView.setEllipsizeByGradient(true,
+                useChatTitleLayoutOutsideChat ? LocaleController.isRTL : null);
+        this.titleTextLargerCopyView.set(titleTextLargerCopyView);
+        titleTextLargerCopyView.setTextColor(getThemedColor(Theme.key_actionBarDefaultTitle));
+        titleTextLargerCopyView.setTextSizePx(dp(glassMode ? 17.5f : 18));
+        titleTextLargerCopyView.setGravity(centerChatTitle ? Gravity.CENTER_HORIZONTAL : Gravity.LEFT);
+        titleTextLargerCopyView.setTypeface(AndroidUtilities.bold());
+        titleTextLargerCopyView.setLeftDrawableTopPadding(-dp(1.3f));
+        titleTextLargerCopyView.setRightDrawable(titleTextView.getRightDrawable());
+        titleTextLargerCopyView.setRightDrawable2(titleTextView.getRightDrawable2());
+        titleTextLargerCopyView.setRightDrawableOutside(titleTextView.getRightDrawableOutside());
+        titleTextLargerCopyView.setCanHideRightDrawable(false);
+        titleTextLargerCopyView.setLeftDrawable(titleTextView.getLeftDrawable());
+        titleTextLargerCopyView.setText(titleTextView.getText());
+        final SimpleTextView fadingTitleCopy = titleTextLargerCopyView;
+        titleTextLargerCopyView.animate().alpha(0).setDuration(350).setInterpolator(CubicBezierInterpolator.EASE_OUT_QUINT).withEndAction(() -> {
+            if (this.titleTextLargerCopyView.compareAndSet(fadingTitleCopy, null)) {
+                removeView(fadingTitleCopy);
+            }
+        }).start();
+        addView(titleTextLargerCopyView);
+
+        SimpleTextView subtitleTextLargerCopyView = this.subtitleTextLargerCopyView.get();
+        if (subtitleTextLargerCopyView != null) {
+            subtitleTextLargerCopyView.animate().cancel();
+            removeView(subtitleTextLargerCopyView);
+        }
+        subtitleTextLargerCopyView = new SimpleTextView(getContext());
+        subtitleTextLargerCopyView.setEllipsizeByGradient(true,
+                useChatTitleLayoutOutsideChat ? LocaleController.isRTL : null);
+        this.subtitleTextLargerCopyView.set(subtitleTextLargerCopyView);
+        subtitleTextLargerCopyView.setTextColor(getThemedColor(Theme.key_actionBarDefaultSubtitle));
+        subtitleTextLargerCopyView.setTag(Theme.key_actionBarDefaultSubtitle);
+        subtitleTextLargerCopyView.setTextSizePx(dp(glassMode ? 13.5f : 14));
+        subtitleTextLargerCopyView.setGravity(centerChatTitle ? Gravity.CENTER_HORIZONTAL : Gravity.LEFT);
+        if (subtitleTextView != null) {
+            subtitleTextLargerCopyView.setText(subtitleTextView.getText());
+        } else if (animatedSubtitleTextView != null) {
+            subtitleTextLargerCopyView.setText(animatedSubtitleTextView.getText());
+        }
+        final SimpleTextView fadingSubtitleCopy = subtitleTextLargerCopyView;
+        subtitleTextLargerCopyView.animate().alpha(0).setDuration(350).setInterpolator(CubicBezierInterpolator.EASE_OUT_QUINT).withEndAction(() -> {
+            if (this.subtitleTextLargerCopyView.compareAndSet(fadingSubtitleCopy, null)) {
+                removeView(fadingSubtitleCopy);
+                if (!allowDrawStories) {
+                    setClipChildren(true);
+                }
+            }
+        }).start();
+        addView(subtitleTextLargerCopyView);
+
+        setClipChildren(false);
+    }
+
+    private void clearLargerTextCopies() {
+        SimpleTextView titleCopy = titleTextLargerCopyView.getAndSet(null);
+        if (titleCopy != null) {
+            titleCopy.animate().cancel();
+            removeView(titleCopy);
+        }
+        SimpleTextView subtitleCopy = subtitleTextLargerCopyView.getAndSet(null);
+        if (subtitleCopy != null) {
+            subtitleCopy.animate().cancel();
+            removeView(subtitleCopy);
+        }
+        if (!allowDrawStories) {
+            setClipChildren(true);
+        }
+    }
+
+    private boolean glassMode;
+    public void setGlassMode() {
+        if (titleTextView != null) {
+            titleTextView.setTextSizePx(dp(17.5f));
+            titleTextView.setOutsideRightDrawableTextClipInset(0);
+        }
+        if (subtitleTextView != null) {
+            subtitleTextView.setTextSizePx(dp(13.5f));
+        }
+        glassMode = true;
+    }
+
+    @Override
+    protected void onLayout(boolean changed, int left, int top, int right, int bottom) {
+        updateCenterChatTitleState();
+        inlineTextClipEnabled = false;
+
+        final int actionBarHeight = ActionBar.getCurrentActionBarHeight();
+        final int viewTop = (actionBarHeight - avatarImageView.getMeasuredHeight() - 2) / 2 + (occupyStatusBar ? AndroidUtilities.statusBarHeight : 0);
+        final int subtitleTop = viewTop + dp(glassMode ? 23.66f : 24);
+
+        if (centerChatTitle && !isInlineCenteredAvatar()) {
+            int cx = resolveCenteredAvatarCx();
+            nmCenteredAvatarCx = cx;
+            avatarImageView.layout(cx - dp(18), viewTop + 1, cx + dp(18), dp(36) + viewTop + 1);
+        } else {
+            avatarImageView.layout(1 + leftPadding, 1 + viewTop, 1 + leftPadding + avatarImageView.getMeasuredWidth(), 1 + viewTop + avatarImageView.getMeasuredHeight());
+        }
+        int l = leftPadding + (avatarImageView.getVisibility() == VISIBLE && !centerChatTitle ? dp(glassMode ? 49.66f : 55) : dp(glassMode ? 12 : 1)) + rightAvatarPadding;
+        float ovalCenterLocal = -1f;
+        int compactContentWidth = 0;
+        if (centerChatTitle && getParent() instanceof ActionBar) {
+            ActionBar parentActionBar = (ActionBar) getParent();
+            ovalCenterLocal = parentActionBar.getChatAvatarOvalCenterInContainer(this);
+            compactContentWidth = parentActionBar.getChatAvatarCompactContentWidth();
+            if (Float.isNaN(ovalCenterLocal)) {
+                ovalCenterLocal = parentActionBar.getWidth() / 2f - getX();
+            }
+        }
+        final float ovalCenter = ovalCenterLocal;
+        float textColumnCenter = ovalCenter;
+        if (centerChatTitle && ovalCenter >= 0 && compactContentWidth > 0) {
+            final int contentInset = dp(4);
+            inlineTextClipLeft = Math.round(
+                    ovalCenter - compactContentWidth / 2f) + contentInset;
+            inlineTextClipRight = Math.round(
+                    ovalCenter + compactContentWidth / 2f) - contentInset;
+            inlineTextClipEnabled = inlineTextClipRight > inlineTextClipLeft;
+        }
+        int titleL = ovalCenter < 0 ? l : Math.round(ovalCenter - titleTextView.getMeasuredWidth() / 2f);
+        SimpleTextView titleTextLargerCopyView = this.titleTextLargerCopyView.get();
+        int titleCopyL = (ovalCenter < 0 || titleTextLargerCopyView == null) ? l : Math.round(ovalCenter - titleTextLargerCopyView.getMeasuredWidth() / 2f);
+        if (isInlineCenteredAvatar() && avatarImageView.getVisibility() == VISIBLE && ovalCenter >= 0) {
+            final int gap = dp(8);
+            final int avatarWidth = avatarImageView.getMeasuredWidth();
+            final int titleWidth = titleTextView.getMeasuredWidth();
+            final int subtitleWidth;
+            if (subtitleTextView != null && subtitleTextView.getVisibility() != GONE) {
+                subtitleWidth = subtitleTextView.getMeasuredWidth();
+            } else if (animatedSubtitleTextView != null && animatedSubtitleTextView.getVisibility() != GONE) {
+                subtitleWidth = animatedSubtitleTextView.getMeasuredWidth();
+            } else {
+                subtitleWidth = 0;
+            }
+            final int naturalTextColumnWidth = Math.max(titleWidth, subtitleWidth);
+            final int contentInset = dp(4);
+            final int naturalGroupWidth = avatarWidth + gap + naturalTextColumnWidth;
+            final int animatedGroupWidth = compactContentWidth - contentInset * 2;
+            final int groupWidth = animatedGroupWidth >= avatarWidth + gap + 1
+                    ? animatedGroupWidth : naturalGroupWidth;
+            final int textColumnWidth = Math.max(1, groupWidth - avatarWidth - gap);
+            final int groupLeft = Math.round(ovalCenter - groupWidth / 2f);
+            final int avatarLeft;
+            final int textColumnLeft;
+            if (LocaleController.isRTL) {
+                textColumnLeft = groupLeft;
+                avatarLeft = textColumnLeft + textColumnWidth + gap;
+            } else {
+                avatarLeft = groupLeft;
+                textColumnLeft = avatarLeft + avatarWidth + gap;
+            }
+            titleL = textColumnLeft + (textColumnWidth - titleWidth) / 2;
+            nmCenteredAvatarCx = avatarLeft + avatarWidth / 2;
+            textColumnCenter = textColumnLeft + textColumnWidth / 2f;
+            inlineTextClipLeft = textColumnLeft;
+            inlineTextClipRight = textColumnLeft + textColumnWidth;
+            inlineTextClipEnabled = inlineTextClipRight > inlineTextClipLeft;
+            avatarImageView.layout(
+                    avatarLeft,
+                    viewTop + 1,
+                    avatarLeft + avatarWidth,
+                    viewTop + 1 + avatarImageView.getMeasuredHeight());
+            if (titleTextLargerCopyView != null) {
+                final int copyWidth = titleTextLargerCopyView.getMeasuredWidth();
+                titleCopyL = textColumnLeft + (textColumnWidth - copyWidth) / 2;
+            }
+        }
+        final int inlineCommunityVisualAdvance =
+                getInlineCommunityIndicatorVisualAdvance();
+        if (inlineCommunityVisualAdvance > 0 && ovalCenter >= 0) {
+            final int opticalOffset =
+                    Math.round(inlineCommunityVisualAdvance / 2f);
+            titleL += LocaleController.isRTL ? opticalOffset : -opticalOffset;
+            if (titleTextLargerCopyView != null) {
+                titleCopyL += LocaleController.isRTL
+                        ? opticalOffset : -opticalOffset;
+            }
+        }
+        if (inlineTextClipEnabled) {
+            final int maxTitleLeft = inlineTextClipRight - titleTextView.getMeasuredWidth();
+            titleL = maxTitleLeft >= inlineTextClipLeft
+                    ? Math.max(inlineTextClipLeft, Math.min(titleL, maxTitleLeft))
+                    : inlineTextClipLeft;
+            if (titleTextLargerCopyView != null) {
+                final int maxCopyLeft = inlineTextClipRight
+                        - titleTextLargerCopyView.getMeasuredWidth();
+                titleCopyL = maxCopyLeft >= inlineTextClipLeft
+                        ? Math.max(inlineTextClipLeft, Math.min(titleCopyL, maxCopyLeft))
+                        : inlineTextClipLeft;
+            }
+        }
+        if (getSubtitleTextView().getVisibility() != GONE) {
+            titleTextView.layout(titleL, viewTop + dp(1.66f) - titleTextView.getPaddingTop(), titleL + titleTextView.getMeasuredWidth(), viewTop + titleTextView.getTextHeight() + dp(1.66f) - titleTextView.getPaddingTop() + titleTextView.getPaddingBottom());
+            if (titleTextLargerCopyView != null) {
+                titleTextLargerCopyView.layout(titleCopyL, viewTop + dp(1.66f), titleCopyL + titleTextLargerCopyView.getMeasuredWidth(), viewTop + titleTextLargerCopyView.getTextHeight() + dp(1.66f));
+            }
+        } else {
+            int titleTop = app.nimarkogram.messenger.NimarkoConfig.hideActionBarStatus ? dp(9) : dp(11);
+            titleTextView.layout(titleL, viewTop + titleTop - titleTextView.getPaddingTop(), titleL + titleTextView.getMeasuredWidth(), viewTop + titleTextView.getTextHeight() + titleTop - titleTextView.getPaddingTop() + titleTextView.getPaddingBottom());
+            if (titleTextLargerCopyView != null) {
+                titleTextLargerCopyView.layout(titleCopyL, viewTop + titleTop, titleCopyL + titleTextLargerCopyView.getMeasuredWidth(), viewTop + titleTextLargerCopyView.getTextHeight() + titleTop);
+            }
+        }
+        if (communityItem != null) {
+            final int communityLeft;
+            final int communityTop;
+            if (shouldUseInlineCommunityIndicator()) {
+                final int gap = dp(INLINE_COMMUNITY_GAP_DP);
+                communityLeft = LocaleController.isRTL
+                        ? titleTextView.getLeft() - gap - communityItem.getMeasuredWidth()
+                        : titleTextView.getRight() + gap;
+                final int titleTextCenterY = titleTextView.getTop()
+                        + titleTextView.getPaddingTop()
+                        + titleTextView.getTextHeight() / 2;
+                communityTop = titleTextCenterY - communityItem.getMeasuredHeight() / 2;
+            } else if (centerChatTitle) {
+                final int communityCenterX = avatarImageView.getRight() - dp(5);
+                final int communityCenterY = Math.round(avatarImageView.getBottom() - dpf2(6.67f));
+                communityLeft = communityCenterX - communityItem.getMeasuredWidth() / 2;
+                communityTop = communityCenterY - communityItem.getMeasuredHeight() / 2;
+            } else {
+                final int communityCenterX = leftPadding + dp(36);
+                final int communityCenterY = viewTop + Math.round(dpf2(34.33f));
+                communityLeft = communityCenterX - communityItem.getMeasuredWidth() / 2;
+                communityTop = communityCenterY - communityItem.getMeasuredHeight() / 2;
+            }
+            communityItem.layout(
+                communityLeft,
+                communityTop,
+                communityLeft + communityItem.getMeasuredWidth(),
+                communityTop + communityItem.getMeasuredHeight());
+        }
+        if (timeItem != null) {
+            if (centerChatTitle) {
+                timeItem.layout(nmCenteredAvatarCx + dp(8), dp(5) + viewTop, nmCenteredAvatarCx + dp(42), viewTop + dp(15 + 34));   // NimarkoGram: TTL badge follows the (dynamically centered) avatar's lower-right corner
+            } else {
+                final int timerTop = subtitleTop - dp(10);
+                timeItem.layout(
+                    leftPadding + dp(19.333f),
+                    timerTop,
+                    leftPadding + dp(19.333f) + timeItem.getMeasuredWidth(),
+                    timerTop + timeItem.getMeasuredHeight()
+                );
+            }
+        }
+        if (starBgItem != null) {
+            final int starLeft = centerChatTitle ? avatarImageView.getRight() - dp(8) : leftPadding + dp(28);
+            final int starTop = centerChatTitle ? avatarImageView.getTop() + dp(23) : viewTop + dp(24);
+            starBgItem.layout(starLeft, starTop, starLeft + starBgItem.getMeasuredWidth(), starTop + starBgItem.getMeasuredHeight());
+        }
+        if (starFgItem != null) {
+            final int starLeft = centerChatTitle ? avatarImageView.getRight() - dp(8) : leftPadding + dp(28);
+            final int starTop = centerChatTitle ? avatarImageView.getTop() + dp(23) : viewTop + dp(24);
+            starFgItem.layout(starLeft, starTop, starLeft + starFgItem.getMeasuredWidth(), starTop + starFgItem.getMeasuredHeight());
+        }
+        if (subtitleTextView != null) {
+            int subtitleL = textColumnCenter < 0 ? l : Math.round(textColumnCenter - subtitleTextView.getMeasuredWidth() / 2f);
+            subtitleTextView.layout(subtitleL, subtitleTop, subtitleL + subtitleTextView.getMeasuredWidth(), subtitleTop + subtitleTextView.getTextHeight());
+        } else if (animatedSubtitleTextView != null) {
+            int subtitleL = textColumnCenter < 0 ? l : Math.round(textColumnCenter - animatedSubtitleTextView.getMeasuredWidth() / 2f);
+            animatedSubtitleTextView.layout(subtitleL, subtitleTop, subtitleL + animatedSubtitleTextView.getMeasuredWidth(), subtitleTop + animatedSubtitleTextView.getTextHeight());
+        }
+        SimpleTextView subtitleTextLargerCopyView = this.subtitleTextLargerCopyView.get();
+        if (subtitleTextLargerCopyView != null) {
+            int subtitleCopyL = textColumnCenter < 0 ? l : Math.round(textColumnCenter - subtitleTextLargerCopyView.getMeasuredWidth() / 2f);
+            subtitleTextLargerCopyView.layout(subtitleCopyL, subtitleTop, subtitleCopyL + subtitleTextLargerCopyView.getMeasuredWidth(), subtitleTop + subtitleTextLargerCopyView.getTextHeight());
+        }
+        syncCenteredAvatarAnchor();
+    }
+
+    public void setLeftPadding(int value) {
+        leftPadding = value;
+    }
+
+    public int getLeftPadding() {
+        return leftPadding;
+    }
+
+    public void setRightAvatarPadding(int value) {
+        rightAvatarPadding = value;
+    }
+
+    public void setCommunityItemVisible(boolean visible) {
+        if (communityItem != null) {
+            final int newVisibility = visible && !avatarImageIsHidden ? VISIBLE : GONE;
+            if (communityItem.getVisibility() != newVisibility) {
+                communityItem.setVisibility(newVisibility);
+                updateCommunityIndicatorStyle();
+                requestLayout();
+                checkActionBar(true);
+            } else {
+                updateCommunityIndicatorStyle();
+            }
+        }
+    }
+
+    @Override
+    public void onFactorChanged(int id, float factor, float fraction, FactorAnimator callee) {
+        if (id == ANIMATOR_ID_TIME_ITEM_VISIBLE) {
+            if (timeItem != null) {
+                timeItem.setAlpha(factor);
+                timeItem.setScaleX(factor * 0.85f);
+                timeItem.setScaleY(factor * 0.85f);
+                timeItem.setVisibility(factor > 0 ? VISIBLE : GONE);
+            }
+        }
+    }
+
+    public void showTimeItem(boolean animated) {
+        animatorTimeVisible.setValue(true, animated);
+    }
+
+    public void hideTimeItem(boolean animated) {
+        animatorTimeVisible.setValue(false, animated);
+    }
+
+    public void setTime(int value, boolean animated) {
+        if (timerDrawable == null) {
+            return;
+        }
+        boolean show = !stars;
+        if (value == 0 && !secretChatTimer) {
+            hideTimeItem(animated);
+            return;
+        }
+        if (show) {
+            showTimeItem(animated);
+            timerDrawable.setTime(value);
+        } else {
+            hideTimeItem(animated);
+        }
+    }
+
+    public boolean stars;
+    public void setStars(boolean stars, boolean animated) {
+        if (starBgItem == null || starFgItem == null) return;
+        this.stars = stars;
+        if (!animated) {
+            starBgItem.setVisibility(stars ? VISIBLE : INVISIBLE);
+            starBgItem.setAlpha(stars ? 1f : 0f);
+            starBgItem.setScaleX(stars ? 1.1f : 0f);
+            starBgItem.setScaleY(stars ? 1.1f : 0f);
+            starFgItem.setVisibility(stars ? VISIBLE : INVISIBLE);
+            starFgItem.setAlpha(stars ? 1f : 0f);
+            starFgItem.setScaleX(stars ? 1f : 0f);
+            starFgItem.setScaleY(stars ? 1f : 0f);
+        } else {
+            if (stars) {
+                starBgItem.setVisibility(VISIBLE);
+                starFgItem.setVisibility(VISIBLE);
+            }
+            starBgItem.animate().alpha(stars ? 1f : 0f).scaleX(stars ? 1.1f : 0f).scaleY(stars ? 1.1f : 0f).withEndAction(() -> {
+                if (!stars) {
+                    starBgItem.setVisibility(INVISIBLE);
+                }
+            }).start();
+            starFgItem.animate().alpha(stars ? 1f : 0f).scaleX(stars ? 1f : 0f).scaleY(stars ? 1f : 0f).withEndAction(() -> {
+                if (!stars) {
+                    starFgItem.setVisibility(INVISIBLE);
+                }
+            }).start();
+        }
+    }
+
+    private boolean rightDrawableIsScamOrVerified = false;
+    private boolean rightDrawableIsScam = false;
+    private String rightDrawableContentDescription = null;
+    private String rightDrawable2ContentDescription = null;
+
+    public void setTitleIcons(Drawable leftIcon, Drawable mutedIcon) {
+        titleTextView.setLeftDrawable(leftIcon);
+        checkActionBar(true);
+    }
+
+    private boolean rightDrawable2IsBadge = false;
+
+    public AnimatedEmojiDrawable.SwapAnimatedEmojiDrawable getBotVerificationDrawable(long icon, boolean animated) {
+        if (icon == 0) {
+            return null;
+        }
+        botVerificationDrawable.set(icon, animated);
+        botVerificationDrawable.setColor(getThemedColor(Theme.key_profile_verifiedBackground));
+        botVerificationDrawable.offset(0, dp(1));
+        return botVerificationDrawable;
+    }
+
+    public void setTitle(CharSequence value) {
+        setTitle(value, false, false, false, false, null, false);
+    }
+
+    public void setTitle(CharSequence value, boolean scam, boolean fake, boolean verified, boolean premium, TLRPC.EmojiStatus emojiStatus, boolean animated) {
+        final Drawable previousRightDrawable = titleTextView.getRightDrawable();
+        final Drawable previousRightDrawable2 = titleTextView.getRightDrawable2();
+        if (value != null) {
+            value = Emoji.replaceEmoji(value, titleTextView.getPaint().getFontMetricsInt(), false);
+        }
+        final boolean titleChanged = titleTextView.setText(value);
+
+        if (app.nimarkogram.messenger.NimarkoConfig.disablePremiumStatuses) {
+            emojiStatus = null;
+            premium = false;
+        }
+
+        boolean isSelfChat = parentFragment != null
+                && parentFragment.getCurrentUser() != null
+                && UserObject.isUserSelf(parentFragment.getCurrentUser());
+        if (isSelfChat) {
+            emojiStatus = null;
+            premium = false;
+        }
+
+        app.nimarkogram.messenger.api.dto.BadgeDTO badge = null;
+        long badgePeerId = 0;
+        try {
+            org.telegram.tgnet.TLObject target = null;
+            if (parentFragment != null) {
+                if (parentFragment.getCurrentUser() != null) target = parentFragment.getCurrentUser();
+                else if (parentFragment.getCurrentChat() != null) target = parentFragment.getCurrentChat();
+            }
+            if (headerIdentityTarget instanceof TLRPC.User
+                    && (!(target instanceof TLRPC.User)
+                    || ((TLRPC.User) target).id != ((TLRPC.User) headerIdentityTarget).id)
+                    || headerIdentityTarget instanceof TLRPC.Chat
+                    && (!(target instanceof TLRPC.Chat)
+                    || ((TLRPC.Chat) target).id != ((TLRPC.Chat) headerIdentityTarget).id)) {
+                target = headerIdentityTarget;
+            }
+            if (target != null) {
+                badgePeerId = target instanceof TLRPC.User ? ((TLRPC.User) target).id
+                        : target instanceof TLRPC.Chat ? -((TLRPC.Chat) target).id : 0;
+                badge = app.nimarkogram.messenger.badges.BadgesController.getInstance().i(target);
+                if (badge != null && badge.getDocumentId() == 0L) badge = null;
+            }
+        } catch (Throwable ignored) {}
+        if (lastNimarkoBadgePeerId != badgePeerId) {
+            if (badgeEmojiDrawable != null) {
+                badgeEmojiDrawable.set((Drawable) null, false);
+                badgeEmojiDrawable.setParticles(false, false);
+            }
+            lastNimarkoBadgeDocId = 0L;
+            lastNimarkoBadgePeerId = badgePeerId;
+        }
+
+        if (badge != null) {
+            if (badgeEmojiDrawable == null) {
+                badgeEmojiDrawable = new AnimatedEmojiDrawable.SwapAnimatedEmojiDrawable(titleTextView, dp(24)) {
+                    private int compositedAlpha = 255;
+                    @Override
+                    public void setAlpha(int alpha) {
+                        compositedAlpha = alpha;
+                        super.setAlpha(255);
+                    }
+                    @Override
+                    public void draw(Canvas canvas) {
+                        if (compositedAlpha <= 0) return;
+                        if (compositedAlpha < 255) {
+                            int save = canvas.saveLayerAlpha(null, compositedAlpha);
+                            super.draw(canvas);
+                            canvas.restoreToCount(save);
+                        } else {
+                            super.draw(canvas);
+                        }
+                    }
+                };
+                badgeEmojiDrawable.setCurrentAccount(currentAccount);
+                if (isAttachedToWindow()) badgeEmojiDrawable.attach();
+            }
+            boolean animateBadge = (animated || isAttachedToWindow())
+                    && lastNimarkoBadgeDocId != 0L && lastNimarkoBadgeDocId != badge.getDocumentId();
+            badgeEmojiDrawable.set(badge.getDocumentId(), animateBadge);
+            badgeEmojiDrawable.setParticles(true, false);
+            badgeEmojiDrawable.setColor(getThemedColor(Theme.key_profile_verifiedBackground));
+            lastNimarkoBadgeDocId = badge.getDocumentId();
+        } else {
+            lastNimarkoBadgeDocId = 0L;
+            if (badgeEmojiDrawable != null) {
+                badgeEmojiDrawable.set((Drawable) null, false);
+                badgeEmojiDrawable.setParticles(false, false);
+            }
+        }
+        CharSequence badgeAccessibilityDescription = badge == null || TextUtils.isEmpty(badge.getText())
+                ? LocaleController.getString(R.string.NM_ProfileBadge)
+                : LocaleController.getString(R.string.NM_ProfileBadge) + ": " + badge.getText();
+
+        boolean emojiStatusPresent = DialogObject.getEmojiStatusDocumentId(emojiStatus) != 0;
+
+        rightDrawableContentDescription = null;
+        rightDrawable2ContentDescription = null;
+        titleTextView.setRightDrawableTopPadding(0);
+        boolean badgeInSlot2 = badge != null && emojiStatusPresent;
+        rightDrawableIsScam = false;
+        if (scam || fake) {
+            rightDrawableIsScam = true;
+            rightDrawable2IsBadge = false;
+            if (!(titleTextView.getRightDrawable2() instanceof ScamDrawable)) {
+                ScamDrawable sd = new ScamDrawable(11, scam ? 0 : 1);
+                sd.setColor(getThemedColor(Theme.key_actionBarDefaultSubtitle));
+                titleTextView.setRightDrawable2(sd);
+                rightDrawable2ContentDescription = LocaleController.getString(R.string.ScamMessage);
+                rightDrawableIsScamOrVerified = true;
+            }
+        } else if (badgeInSlot2) {
+            titleTextView.setRightDrawable2(badgeEmojiDrawable);
+            rightDrawableIsScamOrVerified = false;
+            rightDrawable2IsBadge = true;
+            rightDrawable2ContentDescription = badgeAccessibilityDescription.toString();
+        } else if (verified) {
+            if (verifiedDrawable == null) {
+                verifiedBackground = getResources().getDrawable(R.drawable.verified_area).mutate();
+                verifiedCheck = getResources().getDrawable(R.drawable.verified_check).mutate();
+                verifiedDrawable = new CombinedDrawable(verifiedBackground, verifiedCheck);
+            }
+            verifiedBackground.setColorFilter(new PorterDuffColorFilter(getThemedColor(Theme.key_profile_verifiedBackground), PorterDuff.Mode.MULTIPLY));
+            verifiedCheck.setColorFilter(new PorterDuffColorFilter(getThemedColor(Theme.key_profile_verifiedCheck), PorterDuff.Mode.MULTIPLY));
+            titleTextView.setRightDrawable2(verifiedDrawable);
+            rightDrawableIsScamOrVerified = true;
+            rightDrawable2IsBadge = false;
+            rightDrawable2ContentDescription = LocaleController.getString(R.string.AccDescrVerified);
+        } else {
+            titleTextView.setRightDrawable2(null);
+            rightDrawableIsScamOrVerified = false;
+            rightDrawable2IsBadge = false;
+        }
+
+        Drawable primaryTitleDrawable = null;
+        if ((premium || emojiStatusPresent) && !app.nimarkogram.messenger.NimarkoConfig.disablePremiumStatuses) {
+            if (titleTextView.getRightDrawable() instanceof AnimatedEmojiDrawable.WrapSizeDrawable
+                    && ((AnimatedEmojiDrawable.WrapSizeDrawable) titleTextView.getRightDrawable()).getDrawable() instanceof AnimatedEmojiDrawable) {
+                ((AnimatedEmojiDrawable) ((AnimatedEmojiDrawable.WrapSizeDrawable) titleTextView.getRightDrawable()).getDrawable()).removeView(titleTextView);
+            }
+            if (emojiStatusPresent) {
+                if (animated && titleTextView.getRightDrawable() == emojiStatusDefaultDrawable
+                        && emojiStatusDefaultDrawable != null) {
+                    emojiStatusDrawable.set(emojiStatusDefaultDrawable, false);
+                }
+                emojiStatusDrawable.set(DialogObject.getEmojiStatusDocumentId(emojiStatus), animated);
+                emojiStatusDrawable.setParticles(emojiStatus instanceof TLRPC.TL_emojiStatusCollectible, animated);
+                primaryTitleDrawable = emojiStatusDrawable;
+            } else if (premium && badge != null) {
+                emojiStatusDrawable.set(badgeEmojiDrawable, animated);
+                emojiStatusDrawable.setParticles(false, animated);
+                primaryTitleDrawable = emojiStatusDrawable;
+            } else if (premium) {
+                if (emojiStatusDefaultDrawable == null) {
+                    emojiStatusDefaultDrawable = ContextCompat.getDrawable(
+                            ApplicationLoader.applicationContext,
+                            R.drawable.msg_premium_liststar
+                    ).mutate();
+                }
+                emojiStatusDefaultDrawable.setColorFilter(new PorterDuffColorFilter(getThemedColor(Theme.key_profile_verifiedBackground), PorterDuff.Mode.MULTIPLY));
+                if (titleTextView.getRightDrawable() == emojiStatusDrawable && isAttachedToWindow()
+                        && (animated || emojiStatusDrawable.getDrawable() == emojiStatusDefaultDrawable)) {
+                    emojiStatusDrawable.set(emojiStatusDefaultDrawable, animated);
+                    emojiStatusDrawable.setParticles(false, animated);
+                    primaryTitleDrawable = emojiStatusDrawable;
+                } else {
+                    emojiStatusDrawable.set((Drawable) null, false);
+                    emojiStatusDrawable.setParticles(false, false);
+                    primaryTitleDrawable = emojiStatusDefaultDrawable;
+                }
+            } else {
+                emojiStatusDrawable.set((Drawable) null, animated);
+                emojiStatusDrawable.setParticles(false, animated);
+            }
+            emojiStatusDrawable.setColor(getThemedColor(Theme.key_profile_verifiedBackground));
+            titleTextView.setRightDrawable(primaryTitleDrawable);
+            rightDrawableIsScamOrVerified = false;
+            rightDrawableContentDescription = badge != null && !emojiStatusPresent
+                    ? badgeAccessibilityDescription.toString()
+                    : LocaleController.getString(R.string.AccDescrPremium);
+        } else if (badge != null) {
+            titleTextView.setRightDrawable(badgeEmojiDrawable);
+            rightDrawableContentDescription = badgeAccessibilityDescription.toString();
+        } else {
+            titleTextView.setRightDrawable(null);
+            rightDrawableContentDescription = null;
+        }
+        if (titleTextView.getRightDrawable() != emojiStatusDrawable) {
+            emojiStatusDrawable.set((Drawable) null, false);
+            emojiStatusDrawable.resetAnimation();
+            emojiStatusDrawable.setParticles(false, false);
+        }
+
+        boolean badgeInSlot1 = badge != null && !emojiStatusPresent;
+        final app.nimarkogram.messenger.api.dto.BadgeDTO renderedBadge =
+                badgeInSlot1 || rightDrawable2IsBadge ? badge : null;
+        currentNimarkoBadge = renderedBadge;
+        if (renderedBadge != null) {
+            final app.nimarkogram.messenger.api.dto.BadgeDTO finalBadge = renderedBadge;
+            if (rightDrawable2IsBadge) {
+                titleTextView.setRightDrawable2OnClick(v -> showNimarkoBadgeBulletin(finalBadge));
+                titleTextView.setRightDrawableOnClick(null);
+            } else {
+                titleTextView.setRightDrawableOnClick(v -> showNimarkoBadgeBulletin(finalBadge));
+                titleTextView.setRightDrawable2OnClick(null);
+            }
+        } else {
+            titleTextView.setRightDrawableOnClick(null);
+            titleTextView.setRightDrawable2OnClick(null);
+        }
+        if (titleChanged || previousRightDrawable != titleTextView.getRightDrawable()
+                || previousRightDrawable2 != titleTextView.getRightDrawable2()) {
+            requestLayout();
+        }
+        checkActionBar(animated || subtitleTextView != null && !subtitleHiddenByPreference);
+    }
+
+    private void applyNimarkoBadge(boolean animated) {
+        try {
+            if (parentFragment == null) return;
+            TLRPC.User user = parentFragment.getCurrentUser();
+            TLRPC.Chat chat = parentFragment.getCurrentChat();
+            if (headerIdentityTarget instanceof TLRPC.User
+                    && (user == null || user.id != ((TLRPC.User) headerIdentityTarget).id)) {
+                user = (TLRPC.User) headerIdentityTarget;
+                chat = null;
+            } else if (headerIdentityTarget instanceof TLRPC.Chat
+                    && (chat == null || chat.id != ((TLRPC.Chat) headerIdentityTarget).id)) {
+                chat = (TLRPC.Chat) headerIdentityTarget;
+                user = null;
+            }
+            if (user == null && chat == null) return;
+            boolean premium = user != null && user.premium;
+            TLRPC.EmojiStatus emojiStatus = null;
+            if (user != null) emojiStatus = user.emoji_status;
+            else if (chat != null) emojiStatus = chat.emoji_status;
+            boolean verified = (user != null && user.verified) || (chat != null && chat.verified);
+            boolean scam = (user != null && user.scam) || (chat != null && chat.scam);
+            boolean fake = (user != null && user.fake) || (chat != null && chat.fake);
+            setTitle(titleTextView.getText(), scam, fake, verified, premium, emojiStatus, animated);
+        } catch (Throwable ignored) {}
+    }
+
+    private long lastNimarkoBadgeDocId = 0L;
+    private long lastNimarkoBadgePeerId;
+
+    private void showNimarkoBadgeBulletin(app.nimarkogram.messenger.api.dto.BadgeDTO badge) {
+        try {
+            if (badge == null || parentFragment == null) return;
+            CharSequence rawText = badge.getText();
+            final CharSequence text = TextUtils.isEmpty(rawText)
+                    ? LocaleController.getString(R.string.NM_ProfileBadge) : rawText;
+            final long docId = badge.getDocumentId();
+            org.telegram.tgnet.TLRPC.Document cached =
+                    org.telegram.ui.Components.AnimatedEmojiDrawable.findDocument(currentAccount, docId);
+            if (cached != null) {
+                showBulletinForDoc(cached, text);
+                return;
+            }
+            org.telegram.ui.Components.AnimatedEmojiDrawable
+                    .getDocumentFetcher(currentAccount)
+                    .fetchDocument(docId, d -> {
+                        if (d == null) return;
+                        AndroidUtilities.runOnUIThread(() -> showBulletinForDoc(d, text));
+                    });
+        } catch (Throwable ignored) {}
+    }
+
+    private void showBulletinForDoc(org.telegram.tgnet.TLRPC.Document doc, CharSequence text) {
+        try {
+            if (doc == null || parentFragment == null) return;
+            org.telegram.ui.Components.Bulletin b = org.telegram.ui.Components.BulletinFactory
+                    .of(parentFragment)
+                    .createEmojiBulletin(doc, text);
+            try {
+                if (b.getLayout() instanceof org.telegram.ui.Components.Bulletin.LottieLayout) {
+                    org.telegram.ui.Components.RLottieImageView iv =
+                            ((org.telegram.ui.Components.Bulletin.LottieLayout) b.getLayout()).imageView;
+                    if (iv.getImageReceiver() != null) {
+                        iv.getImageReceiver().setRoundRadius(AndroidUtilities.dp(8));
+                    }
+                }
+            } catch (Throwable ignored) {}
+            b.show();
+        } catch (Throwable ignored) {}
+    }
+
+    private Drawable emojiStatusDefaultDrawable;
+    private Drawable verifiedBackground;
+    private Drawable verifiedCheck;
+    private Drawable verifiedDrawable;
+
+
+    public void setSubtitle(CharSequence value) {
+        if (app.nimarkogram.messenger.NimarkoConfig.hideActionBarStatus) {
+            subtitleHiddenByPreference = true;
+            inlineSubtitleWidthReserve = 0f;
+            subtitleTransitionGeneration++;
+            subtitleTransitionRunning = false;
+            if (subtitleTextView != null) {
+                subtitleTextView.animate().setListener(null).cancel();
+                ((SubtitleTextView) subtitleTextView).finishCrossfade();
+                ((SubtitleTextView) subtitleTextView).resetPresentation();
+                subtitleTextView.setText("");
+                subtitleTextView.setAlpha(0f);
+                subtitleTextView.setVisibility(GONE);
+            } else if (animatedSubtitleTextView != null) {
+                animatedSubtitleTextView.setText("");
+                animatedSubtitleTextView.setVisibility(GONE);
+            }
+            requestLayout();
+            checkActionBar(true);
+            return;
+        }
+        if (subtitleHiddenByPreference) {
+            subtitleHiddenByPreference = false;
+            if (subtitleTextView != null) {
+                subtitleTextView.setVisibility(VISIBLE);
+                subtitleTextView.setAlpha(1f);
+            } else if (animatedSubtitleTextView != null) {
+                animatedSubtitleTextView.setVisibility(VISIBLE);
+                animatedSubtitleTextView.setAlpha(1f);
+            }
+        }
+        if (lastSubtitle == null) {
+            if (subtitleTextView != null) {
+                setSubtitleTextSmooth(value);
+            } else if (animatedSubtitleTextView != null) {
+                animatedSubtitleTextView.setText(value);
+            }
+        } else {
+            if (!TextUtils.equals(lastSubtitle, value)) subtitleScrollingState = null;
+            lastSubtitle = value;
+        }
+        checkActionBar(true);
+    }
+
+    private void setSubtitleTextSmooth(CharSequence value) {
+        if (subtitleTextView == null) {
+            return;
+        }
+        final CharSequence target = value == null ? "" : TextUtils.stringOrSpannedString(value);
+        final int targetTypingType = getSubtitleTypingType();
+        final SubtitleTextView view = (SubtitleTextView) subtitleTextView;
+        final boolean retain = view.canRetainSubtitle();
+        final boolean visible = view.isPresentationVisible();
+        if (!retain) {
+            if (!view.hasPresentedIdentity()) subtitleScrollingState = null;
+            view.finishCrossfade();
+            view.resetPresentation();
+        }
+        if (TextUtils.equals(subtitleTextView.getText(), target)
+                && appliedTypingType == targetTypingType) {
+            if (retain && !visible && view.crossfade != null) {
+                view.deferCrossfade();
+            }
+            if (!subtitleTransitionRunning) applySubtitleColor();
+            return;
+        }
+        final float startWidth = view.snapshotGlassWidth();
+        final float previousWidth = view.outgoing != null && view.presentedProgress == 0f
+                ? inlineSubtitleWidthReserve : Math.max(inlineSubtitleWidthReserve,
+                        view.getTextWidth() + view.getSideDrawablesSize());
+        subtitleTransitionTarget = target;
+        subtitleTextView.animate().setListener(null).cancel();
+        if (retain) {
+            view.captureSubtitle();
+        }
+        final boolean transition = view.outgoing != null;
+        applyTypingAnimation();
+        view.setText(target);
+        if (titleAnimation == null) {
+            view.setAlpha(1f);
+        }
+        inlineSubtitleWidthReserve = transition && centerChatTitle ? previousWidth : 0f;
+        subtitleWidthTransitionStart = transition ? startWidth : 0f;
+        subtitleTransitionRunning = transition;
+        view.pendingReveal = transition && !visible;
+        if (transition && visible) {
+            view.startCrossfade();
+        }
+        requestLayout();
+        checkActionBar(true);
+    }
+
+    public ImageView getTimeItem() {
+        return timeItem;
+    }
+
+    public SimpleTextView getTitleTextView() {
+        return titleTextView;
+    }
+
+    public View getSubtitleTextView() {
+        if (subtitleTextView != null) {
+            return subtitleTextView;
+        }
+        if (animatedSubtitleTextView != null) {
+            return animatedSubtitleTextView;
+        }
+        return null;
+    }
+
+    public TextPaint getSubtitlePaint() {
+        return subtitleTextView != null ? subtitleTextView.getTextPaint() : animatedSubtitleTextView.getPaint();
+    }
+
+    public void onDestroy() {
+        clearLargerTextCopies();
+        if (actionBar != null) {
+            actionBar.clearChatAvatarContainer(this);
+            actionBar = null;
+        }
+        if (sharedMediaPreloader != null) {
+            sharedMediaPreloader.onDestroy(parentFragment);
+        }
+    }
+
+    private void setTypingAnimation(boolean start) {
+        Integer type = start && parentFragment != null
+                ? (subtitleIsThinkingBot ? Integer.valueOf(0) : MessagesController.getInstance(currentAccount)
+                    .getPrintingStringType(parentFragment.getDialogId(), parentFragment.getThreadId()))
+                : null;
+        requestedTypingType = type != null && type >= 0 && type < statusDrawables.length
+                && statusDrawables[type] != null ? type : -1;
+        if (app.nimarkogram.messenger.NimarkoConfig.hideActionBarStatus) {
+            requestedTypingType = -1;
+            applyTypingAnimation();
+        }
+    }
+    private int getSubtitleTypingType() {
+        return lastSubtitle != null || app.nimarkogram.messenger.NimarkoConfig.hideActionBarStatus
+                ? -1 : requestedTypingType;
+    }
+    private void applyTypingAnimation() {
+        if (subtitleTextView == null) return;
+        applySubtitleColor();
+        final int typingType = getSubtitleTypingType();
+        if (appliedTypingType == typingType) {
+            return;
+        }
+        appliedTypingType = typingType;
+        if (appliedTypingType >= 0) {
+            try {
+                int type = appliedTypingType;
+                if (statusDrawables[type] == null) return;
+                if (type == 5) {
+                    subtitleTextView.replaceTextWithDrawable(statusDrawables[type], "**oo**");
+                    statusDrawables[type].setColor(getThemedColor(Theme.key_chat_status));
+                    subtitleTextView.setLeftDrawable(null);
+                } else {
+                    subtitleTextView.replaceTextWithDrawable(null, null);
+                    statusDrawables[type].setColor(getThemedColor(Theme.key_chat_status));
+                    subtitleTextView.setLeftDrawable(statusDrawables[type]);
+                }
+                currentTypingDrawable = statusDrawables[type];
+                for (int a = 0; a < statusDrawables.length; a++) {
+                    if (statusDrawables[a] == null) continue;
+                    if (a == type) {
+                        statusDrawables[a].start();
+                    } else {
+                        statusDrawables[a].stop();
+                    }
+                }
+            } catch (Exception e) {
+                FileLog.e(e);
+            }
+        } else {
+            currentTypingDrawable = null;
+            subtitleTextView.setLeftDrawable(null);
+            subtitleTextView.replaceTextWithDrawable(null, null);
+            for (int a = 0; a < statusDrawables.length; a++) {
+                if (statusDrawables[a] != null) {
+                    statusDrawables[a].stop();
+                }
+            }
+        }
+    }
+
+    public void updateSubtitle() {
+        updateSubtitle(false);
+    }
+    private void applySubtitleColor() {
+        if (subtitleTextView == null) return;
+        int colorKey = lastSubtitle != null ? Theme.key_actionBarDefaultSubtitle : lastSubtitleColorKey;
+        if (overrideSubtitleColor == null && colorKey < 0) return;
+        subtitleTextView.setTextColor(overrideSubtitleColor != null
+                ? overrideSubtitleColor : getThemedColor(colorKey));
+        if (overrideSubtitleColor == null) subtitleTextView.setTag(colorKey);
+    }
+
+    private boolean subtitleIsThinkingBot;
+
+    private boolean showingSavedMessagesHint;
+
+    public void updateSubtitle(boolean animated) {
+        if (parentFragment == null) {
+            return;
+        }
+        if (parentFragment.getChatMode() == ChatActivity.MODE_EDIT_BUSINESS_LINK) {
+            setSubtitle(BusinessLinksController.stripHttps(parentFragment.businessLink.link));
+            return;
+        }
+        TLRPC.User user = parentFragment.getCurrentUser();
+        TLRPC.Chat chat = parentFragment.getCurrentChat();
+        boolean showSavedMessagesHint = (
+            UserObject.isUserSelf(user) &&
+            parentFragment.getChatMode() == ChatActivity.MODE_DEFAULT &&
+            parentFragment.getMessagesController().getSavedMessagesController().getAllCount() >= 3 &&
+            (showingSavedMessagesHint || (MessagesController.getGlobalMainSettings().getInt("savedmsgschatshint", 0) < 3))
+        );
+        if ((UserObject.isUserSelf(user) && !showSavedMessagesHint || UserObject.isReplyUser(user) || user != null && user.id == UserObject.VERIFY || parentFragment.getChatMode() != 0 && parentFragment.getChatMode() != ChatActivity.MODE_SUGGESTIONS) && parentFragment.getChatMode() != ChatActivity.MODE_SAVED) {
+            if (getSubtitleTextView().getVisibility() != GONE) {
+                getSubtitleTextView().setVisibility(GONE);
+            }
+            return;
+        } else if (showSavedMessagesHint) {
+            if (getSubtitleTextView().getVisibility() != VISIBLE) {
+                getSubtitleTextView().setVisibility(VISIBLE);
+            }
+            if (!showingSavedMessagesHint) {
+                MessagesController.getGlobalMainSettings().edit().putInt(
+                    "savedmsgschatshint", MessagesController.getGlobalMainSettings().getInt("savedmsgschatshint", 0) + 1
+                ).apply();
+                showingSavedMessagesHint = true;
+            }
+        }
+
+        subtitleIsThinkingBot = false;
+        CharSequence printString = MessagesController.getInstance(currentAccount).getPrintingString(parentFragment.getDialogId(), parentFragment.getThreadId(), false);
+        if (printString == null && UserObject.isBotForum(user)) {
+        }
+
+        if (printString != null) {
+            printString = TextUtils.replace(printString, new String[]{"..."}, new String[]{""});
+        }
+        CharSequence newSubtitle;
+        boolean useOnlineColor = false;
+        if (printString == null || printString.length() == 0 || ChatObject.isChannel(chat) && !chat.megagroup) {
+            if (parentFragment.isThreadChat() && !parentFragment.isTopic) {
+                if (titleTextView.getTag() != null) {
+                    return;
+                }
+                titleTextView.setTag(1);
+                if (titleAnimation != null) {
+                    titleAnimation.removeAllListeners();
+                    titleAnimation.cancel();
+                    titleAnimation = null;
+                }
+                if (animated) {
+                    titleAnimation = new AnimatorSet();
+                    titleAnimation.playTogether(
+                        ObjectAnimator.ofFloat(titleTextView, View.TRANSLATION_Y, dp(9.7f)),
+                        ObjectAnimator.ofFloat(getSubtitleTextView(), View.ALPHA, 0.0f)
+                    );
+                    titleAnimation.addListener(new AnimatorListenerAdapter() {
+                        @Override
+                        public void onAnimationCancel(Animator animation) {
+                            titleAnimation = null;
+                        }
+
+                        @Override
+                        public void onAnimationEnd(Animator animation) {
+                            if (titleAnimation == animation) {
+                                getSubtitleTextView().setVisibility(INVISIBLE);
+                                titleAnimation = null;
+                            }
+                        }
+                    });
+                    titleAnimation.setDuration(180);
+                    titleAnimation.start();
+                    NimarkoUiAnimationClock.track(titleAnimation);
+                } else {
+                    titleTextView.setTranslationY(dp(9.7f));
+                    getSubtitleTextView().setAlpha(0.0f);
+                    getSubtitleTextView().setVisibility(INVISIBLE);
+                }
+                return;
+            }
+            setTypingAnimation(false);
+            if (parentFragment.getChatMode() == ChatActivity.MODE_SUGGESTIONS) {
+                if (parentFragment.isSubscriberSuggestions) {
+                    newSubtitle = getString(R.string.ChatMessageSuggestions);
+                } else {
+                    final long dialogId = parentFragment.getTopicId();
+                    if (dialogId == 0) {
+                        int topicsCount = parentFragment.getMessagesController().getTopicsController().getTopicsCount(-parentFragment.getDialogId());
+                        if (topicsCount > 0) {
+                            newSubtitle = LocaleController.formatPluralStringComma("Chats", topicsCount);
+                        } else {
+                            newSubtitle = getString(R.string.ChatMessageSuggestions);
+                        }
+                    } else {
+                        TLRPC.TL_forumTopic topic = MessagesController.getInstance(currentAccount).getTopicsController().findTopic(chat.id, parentFragment.getTopicId());
+                        int count = 0;
+                        if (topic != null) {
+                            count = topic.totalMessagesCount;
+                        }
+                        if (count > 0) {
+                            newSubtitle = LocaleController.formatPluralString("messages", count, count);
+                        } else {
+                            newSubtitle = LocaleController.formatString(R.string.TopicProfileStatus, ForumUtilities.getMonoForumTitle(currentAccount, chat));
+                        }
+                    }
+                }
+            } else if (parentFragment.getChatMode() == ChatActivity.MODE_SAVED) {
+                int messagesCount = parentFragment.getMessagesController().getSavedMessagesController().getMessagesCount(parentFragment.getSavedDialogId());
+                newSubtitle = LocaleController.formatPluralString("SavedMessagesCount", Math.max(1, messagesCount));
+            } else if (parentFragment.isTopic && chat != null) {
+                TLRPC.TL_forumTopic topic = MessagesController.getInstance(currentAccount).getTopicsController().findTopic(chat.id, parentFragment.getTopicId());
+                int count = 0;
+                if (topic != null) {
+                    count = topic.totalMessagesCount - 1;
+                }
+                if (count > 0) {
+                    newSubtitle = LocaleController.formatPluralString("messages", count, count);
+                } else {
+                    newSubtitle = LocaleController.formatString(R.string.TopicProfileStatus, chat.title);
+                }
+            } else if (chat != null) {
+                TLRPC.ChatFull info = parentFragment.getCurrentChatInfo();
+                newSubtitle = getChatSubtitle(chat, info, onlineCount);
+            } else if (user != null) {
+                TLRPC.User newUser = MessagesController.getInstance(currentAccount).getUser(user.id);
+                if (newUser != null) {
+                    user = newUser;
+                }
+                CharSequence newStatus;
+                if (UserObject.isReplyUser(user)) {
+                    newStatus = "";
+                } else if (user.id == UserObject.VERIFY) {
+                    newStatus = "";//LocaleController.getString(R.string.VerifyCodesNotifications);
+                } else if (user.id == UserConfig.getInstance(currentAccount).getClientUserId()) {
+                    if (showSavedMessagesHint) {
+                        newStatus = replaceArrows(getString(R.string.SavedMessagesViewAsChatsHint), false);
+                    } else {
+                        newStatus = getString(R.string.ChatYourSelf);
+                    }
+                } else if (user.id == 333000 || user.id == 777000 || user.id == 42777) {
+                    newStatus = getString(R.string.ServiceNotifications);
+                } else if (MessagesController.isSupportUser(user)) {
+                    newStatus = getString(R.string.SupportStatus);
+                } else if (user.bot && user.bot_active_users != 0) {
+                    newStatus = LocaleController.formatPluralStringComma("BotUsers", user.bot_active_users, ',');
+                } else if (user.bot) {
+                    newStatus = getString(R.string.Bot);
+                } else {
+                    isOnline[0] = false;
+                    newStatus = app.nimarkogram.messenger.NimarkoConfig.oldTimeStyle
+                            ? LocaleController.formatUserStatus(currentAccount, user, isOnline, allowShorterStatus ? statusMadeShorter : null)
+                            : LocaleController.formatUserStatusIOS(currentAccount, user, isOnline, allowShorterStatus ? statusMadeShorter : null);
+                    useOnlineColor = isOnline[0];
+                }
+                newSubtitle = newStatus;
+            } else {
+                newSubtitle = "";
+            }
+        } else {
+            if (parentFragment.isThreadChat()) {
+                if (titleTextView.getTag() != null) {
+                    titleTextView.setTag(null);
+                    getSubtitleTextView().setVisibility(VISIBLE);
+                    if (titleAnimation != null) {
+                        titleAnimation.removeAllListeners();
+                        titleAnimation.cancel();
+                        titleAnimation = null;
+                    }
+                    if (animated) {
+                        titleAnimation = new AnimatorSet();
+                        titleAnimation.playTogether(
+                                ObjectAnimator.ofFloat(titleTextView, View.TRANSLATION_Y, 0),
+                                ObjectAnimator.ofFloat(getSubtitleTextView(), View.ALPHA, 1.0f));
+                        titleAnimation.addListener(new AnimatorListenerAdapter() {
+                            @Override
+                            public void onAnimationEnd(Animator animation) {
+                                titleAnimation = null;
+                            }
+                        });
+                        titleAnimation.setDuration(180);
+                        titleAnimation.start();
+                        NimarkoUiAnimationClock.track(titleAnimation);
+                    } else {
+                        titleTextView.setTranslationY(0.0f);
+                        getSubtitleTextView().setAlpha(1.0f);
+                    }
+                }
+            }
+            newSubtitle = printString;
+            Integer type = MessagesController.getInstance(currentAccount).getPrintingStringType(parentFragment.getDialogId(), parentFragment.getThreadId());
+            if (type != null && type == 5) {
+                newSubtitle = Emoji.replaceEmoji(newSubtitle, getSubtitlePaint().getFontMetricsInt(), false);
+            }
+            useOnlineColor = true;
+            setTypingAnimation(true);
+        }
+        if (app.nimarkogram.messenger.NimarkoConfig.hideActionBarStatus) {
+            newSubtitle = "";
+            if (!subtitleHiddenByPreference && subtitleTextView != null) {
+                subtitleTransitionGeneration++;
+                subtitleTransitionRunning = false;
+                inlineSubtitleWidthReserve = 0f;
+                ((SubtitleTextView) subtitleTextView).finishCrossfade();
+                ((SubtitleTextView) subtitleTextView).resetPresentation();
+            }
+            subtitleHiddenByPreference = true;
+            setTypingAnimation(false);
+            if (getSubtitleTextView() != null && getSubtitleTextView().getVisibility() != GONE) {
+                getSubtitleTextView().setVisibility(GONE);
+            }
+        } else if (!parentFragment.isThreadChat() && (chat != null || subtitleHiddenByPreference)) {
+            subtitleHiddenByPreference = false;
+            View subtitle = getSubtitleTextView();
+            if (subtitle.getVisibility() != VISIBLE) {
+                subtitle.setVisibility(VISIBLE);
+            }
+            if (subtitle.getAlpha() != 1f) {
+                subtitle.setAlpha(1f);
+            }
+        }
+        lastSubtitleColorKey = useOnlineColor ? Theme.key_chat_status : Theme.key_actionBarDefaultSubtitle;
+        if (lastSubtitle == null) {
+            if (subtitleTextView != null) {
+                setSubtitleTextSmooth(newSubtitle);
+                if (!subtitleTransitionRunning) applySubtitleColor();
+            } else {
+                animatedSubtitleTextView.setText(newSubtitle, animated);
+                if (overrideSubtitleColor == null) {
+                    animatedSubtitleTextView.setTextColor(getThemedColor(lastSubtitleColorKey));
+                    animatedSubtitleTextView.setTag(lastSubtitleColorKey);
+                } else {
+                    animatedSubtitleTextView.setTextColor(overrideSubtitleColor);
+                }
+            }
+        } else {
+            if (!TextUtils.equals(lastSubtitle, newSubtitle)) subtitleScrollingState = null;
+            lastSubtitle = newSubtitle;
+        }
+        checkActionBar(animated || subtitleTextView != null && !subtitleHiddenByPreference);
+    }
+
+    public static CharSequence getChatSubtitle(TLRPC.Chat chat, TLRPC.ChatFull info, int onlineCount) {
+        CharSequence newSubtitle = null;
+        if (ChatObject.isChannel(chat)) {
+            final int participantsCount = info != null && info.participants_count != 0
+                    ? info.participants_count : chat.megagroup ? chat.participants_count : 0;
+            if (participantsCount != 0) {
+                if (chat.megagroup) {
+                    if (onlineCount > 1) {
+                        newSubtitle = String.format("%s, %s", LocaleController.formatPluralString("Members", participantsCount), LocaleController.formatPluralString("OnlineCount", Math.min(onlineCount, participantsCount)));
+                    } else {
+                        newSubtitle = LocaleController.formatPluralString("Members", participantsCount);
+                    }
+                } else {
+                    int[] result = new int[1];
+                    boolean ignoreShort = AndroidUtilities.isAccessibilityScreenReaderEnabled();
+                    String shortNumber = ignoreShort ? String.valueOf(result[0] = participantsCount) : LocaleController.formatShortNumber(participantsCount, result);
+                    if (chat.megagroup) {
+                        newSubtitle = LocaleController.formatPluralString("Members", result[0]).replace(String.format("%d", result[0]), shortNumber);
+                    } else {
+                        newSubtitle = LocaleController.formatPluralString("Subscribers", result[0]).replace(String.format("%d", result[0]), shortNumber);
+                    }
+                }
+            } else {
+                if (chat.megagroup) {
+                    if (info == null) {
+                        newSubtitle = getString(R.string.Loading).toLowerCase();
+                    } else {
+                        if (chat.has_geo) {
+                            newSubtitle = getString(R.string.MegaLocation).toLowerCase();
+                        } else if (ChatObject.isPublic(chat)) {
+                            newSubtitle = getString(R.string.MegaPublic).toLowerCase();
+                        } else {
+                            newSubtitle = getString(R.string.MegaPrivate).toLowerCase();
+                        }
+                    }
+                } else {
+                    if (ChatObject.isPublic(chat)) {
+                        newSubtitle = getString(R.string.ChannelPublic).toLowerCase();
+                    } else {
+                        newSubtitle = getString(R.string.ChannelPrivate).toLowerCase();
+                    }
+                }
+            }
+        } else {
+            if (ChatObject.isKickedFromChat(chat)) {
+                newSubtitle = getString(R.string.YouWereKicked);
+            } else if (ChatObject.isLeftFromChat(chat)) {
+                newSubtitle = getString(R.string.YouLeft);
+            } else {
+                int count = chat.participants_count;
+                if (info != null && info.participants != null) {
+                    count = info.participants.participants.size();
+                }
+                if (onlineCount > 1 && count != 0) {
+                    newSubtitle = String.format("%s, %s", LocaleController.formatPluralString("Members", count), LocaleController.formatPluralString("OnlineCount", onlineCount));
+                } else {
+                    newSubtitle = LocaleController.formatPluralString("Members", count);
+                }
+            }
+        }
+        return newSubtitle;
+    }
+
+    public int getLastSubtitleColorKey() {
+        return lastSubtitleColorKey;
+    }
+
+    public void setChatAvatar(TLRPC.Chat chat) {
+        headerIdentityTarget = chat;
+        avatarDrawable.setInfo(currentAccount, chat);
+        if (avatarImageView != null) {
+            avatarImageView.setForUserOrChat(chat, avatarDrawable);
+            avatarImageView.setRoundRadius(ChatObject.isForum(chat)
+                    ? AndroidUtilities.dp(16) : AndroidUtilities.dp(21));
+        }
+    }
+
+    public void setUserAvatar(TLRPC.User user) {
+        setUserAvatar(user, false);
+    }
+
+    public void setUserAvatar(TLRPC.User user, boolean showSelf) {
+        headerIdentityTarget = user;
+        avatarDrawable.setInfo(currentAccount, user);
+        if (avatarImageView != null) {
+            avatarImageView.setRoundRadius(AndroidUtilities.dp(21));
+        }
+        if (UserObject.isReplyUser(user)) {
+            avatarDrawable.setAvatarType(AvatarDrawable.AVATAR_TYPE_REPLIES);
+            avatarDrawable.setScaleSize(.8f);
+            if (avatarImageView != null) {
+                avatarImageView.setImage(null, null, avatarDrawable, user);
+            }
+        } else if (UserObject.isAnonymous(user)) {
+            avatarDrawable.setAvatarType(AvatarDrawable.AVATAR_TYPE_ANONYMOUS);
+            avatarDrawable.setScaleSize(.8f);
+            if (avatarImageView != null) {
+                avatarImageView.setImage(null, null, avatarDrawable, user);
+            }
+        } else if (UserObject.isUserSelf(user) && !showSelf) {
+            avatarDrawable.setAvatarType(AvatarDrawable.AVATAR_TYPE_SAVED);
+            avatarDrawable.setScaleSize(.8f);
+            if (avatarImageView != null) {
+                avatarImageView.setImage(null, null, avatarDrawable, user);
+            }
+        } else {
+            avatarDrawable.setScaleSize(1f);
+            if (avatarImageView != null) {
+                avatarImageView.getImageReceiver().setForUserOrChat(user, avatarDrawable,
+                        null, true, VectorAvatarThumbDrawable.TYPE_STATIC, false);
+            }
+        }
+    }
+
+    public void checkAndUpdateAvatar() {
+        if (parentFragment == null) {
+            return;
+        }
+
+        TLRPC.User user = parentFragment.getCurrentUser();
+        TLRPC.Chat chat = parentFragment.getCurrentChat();
+        if (parentFragment.getChatMode() == ChatActivity.MODE_SAVED) {
+            long dialogId = parentFragment.getSavedDialogId();
+            if (dialogId >= 0) {
+                user = parentFragment.getMessagesController().getUser(dialogId);
+                chat = null;
+            } else {
+                user = null;
+                chat = parentFragment.getMessagesController().getChat(-dialogId);
+            }
+        }
+        if (user != null) {
+            avatarDrawable.setInfo(currentAccount, user);
+            if (UserObject.isReplyUser(user)) {
+                avatarDrawable.setScaleSize(.8f);
+                avatarDrawable.setAvatarType(AvatarDrawable.AVATAR_TYPE_REPLIES);
+                if (avatarImageView != null) {
+                    avatarImageView.setAnimatedEmojiDrawable(null);
+                    avatarImageView.setImage(null, null, avatarDrawable, user);
+                }
+            } else if (UserObject.isAnonymous(user)) {
+                avatarDrawable.setScaleSize(.8f);
+                avatarDrawable.setAvatarType(AvatarDrawable.AVATAR_TYPE_ANONYMOUS);
+                if (avatarImageView != null) {
+                    avatarImageView.setAnimatedEmojiDrawable(null);
+                    avatarImageView.setImage(null, null, avatarDrawable, user);
+                }
+            } else if (UserObject.isUserSelf(user) && parentFragment.getChatMode() == ChatActivity.MODE_SAVED) {
+                avatarDrawable.setScaleSize(.8f);
+                avatarDrawable.setAvatarType(AvatarDrawable.AVATAR_TYPE_MY_NOTES);
+                if (avatarImageView != null) {
+                    avatarImageView.setAnimatedEmojiDrawable(null);
+                    avatarImageView.setImage(null, null, avatarDrawable, user);
+                }
+            } else if (UserObject.isUserSelf(user)) {
+                avatarDrawable.setScaleSize(.8f);
+                avatarDrawable.setAvatarType(AvatarDrawable.AVATAR_TYPE_SAVED);
+                if (avatarImageView != null) {
+                    avatarImageView.setAnimatedEmojiDrawable(null);
+                    avatarImageView.setImage(null, null, avatarDrawable, user);
+                }
+            } else {
+                avatarDrawable.setScaleSize(1f);
+                if (avatarImageView != null) {
+                    avatarImageView.setAnimatedEmojiDrawable(null);
+                    avatarImageView.imageReceiver.setForUserOrChat(user, avatarDrawable,  null, true, VectorAvatarThumbDrawable.TYPE_STATIC, false);
+                }
+            }
+        } else if (ChatObject.isMonoForum(chat)) {
+            final long dialogId = parentFragment.getTopicId();
+            if (ChatObject.canManageMonoForum(currentAccount, chat) && dialogId != 0) {
+                if (dialogId > 0) {
+                    final TLRPC.User user2 = parentFragment.getMessagesController().getUser(dialogId);
+                    avatarDrawable.setInfo(user2);
+                    avatarImageView.setAnimatedEmojiDrawable(null);
+                    avatarImageView.setForUserOrChat(user2, avatarDrawable);
+                } else {
+                    final TLRPC.Chat chat2 = parentFragment.getMessagesController().getChat(-dialogId);
+                    avatarDrawable.setInfo(chat2);
+                    avatarImageView.setAnimatedEmojiDrawable(null);
+                    avatarImageView.setForUserOrChat(chat2, avatarDrawable);
+                }
+            } else {
+                avatarImageView.setAnimatedEmojiDrawable(null);
+                ForumUtilities.setMonoForumAvatar(currentAccount, chat, avatarDrawable, avatarImageView);
+            }
+            avatarImageView.setRoundRadius(AndroidUtilities.dp(21));
+        } else if (chat != null) {
+            avatarDrawable.setScaleSize(1f);
+            avatarDrawable.setInfo(currentAccount, chat);
+
+            if (avatarImageView != null) {
+                avatarImageView.setAnimatedEmojiDrawable(null);
+                avatarImageView.setForUserOrChat(chat, avatarDrawable);
+                avatarImageView.setRoundRadius(chat.forum
+                        ? AndroidUtilities.dp(16) : AndroidUtilities.dp(21));
+            }
+        }
+    }
+
+    public void updateOnlineCount() {
+        if (parentFragment == null) {
+            return;
+        }
+        onlineCount = 0;
+        TLRPC.ChatFull info = parentFragment.getCurrentChatInfo();
+        if (info == null) {
+            return;
+        }
+        int currentTime = ConnectionsManager.getInstance(currentAccount).getCurrentTime();
+        if (info instanceof TLRPC.TL_chatFull || info instanceof TLRPC.TL_channelFull && info.participants_count <= 200 && info.participants != null) {
+            for (int a = 0; a < info.participants.participants.size(); a++) {
+                TLRPC.ChatParticipant participant = info.participants.participants.get(a);
+                TLRPC.User user = MessagesController.getInstance(currentAccount).getUser(participant.user_id);
+                if (user != null && user.status != null && (user.status.expires > currentTime || user.id == UserConfig.getInstance(currentAccount).getClientUserId()) && user.status.expires > 10000) {
+                    onlineCount++;
+                }
+            }
+        } else if (info instanceof TLRPC.TL_channelFull && info.participants_count > 200) {
+            onlineCount = info.online_count;
+        }
+    }
+
+    @Override
+    protected void onAttachedToWindow() {
+        super.onAttachedToWindow();
+        registerWithActionBarIfAttached();
+        if (parentFragment != null) {
+            NotificationCenter.getInstance(currentAccount).addObserver(this, NotificationCenter.didUpdateConnectionState);
+            NotificationCenter.getGlobalInstance().addObserver(this, NotificationCenter.emojiLoaded);
+            NotificationCenter.getInstance(currentAccount).addObserver(this, NotificationCenter.updateInterfaces);
+            NotificationCenter.getGlobalInstance().addObserver(this, NotificationCenter.dialogsNeedReload);
+            NotificationCenter.getInstance(currentAccount).addObserver(this, NotificationCenter.chatInfoDidLoad);
+            NotificationCenter.getInstance(currentAccount).addObserver(this, NotificationCenter.userInfoDidLoad);
+            if (parentFragment.getChatMode() == ChatActivity.MODE_SAVED) {
+                NotificationCenter.getInstance(currentAccount).addObserver(this, NotificationCenter.savedMessagesDialogsUpdate);
+            }
+            currentConnectionState = ConnectionsManager.getInstance(currentAccount).getConnectionState();
+            updateCurrentConnectionState();
+        }
+        if (emojiStatusDrawable != null) {
+            emojiStatusDrawable.attach();
+        }
+        if (botVerificationDrawable != null) {
+            botVerificationDrawable.attach();
+        }
+        if (badgeEmojiDrawable != null) {
+            badgeEmojiDrawable.attach();
+        }
+        if (parentFragment != null) {
+            applyNimarkoBadge(false);
+        }
+    }
+
+    @Override
+    protected void onDetachedFromWindow() {
+        super.onDetachedFromWindow();
+        subtitleScrollingState = null;
+        if (actionBar != null) {
+            actionBar.clearChatAvatarContainer(this);
+        }
+        clearLargerTextCopies();
+        subtitleTransitionGeneration++;
+        subtitleTransitionRunning = false;
+        if (titleTextView != null) {
+            titleTextView.animate().setListener(null).cancel();
+        }
+        if (subtitleTextView != null) {
+            subtitleTextView.animate().setListener(null).cancel();
+            ((SubtitleTextView) subtitleTextView).finishCrossfade();
+            ((SubtitleTextView) subtitleTextView).resetPresentation();
+            subtitleTextView.setAlpha(1f);
+            inlineSubtitleWidthReserve = 0f;
+        }
+        if (animatedSubtitleTextView != null) {
+            animatedSubtitleTextView.animate().setListener(null).cancel();
+        }
+        if (titleAnimation != null) {
+            titleAnimation.removeAllListeners();
+            titleAnimation.cancel();
+            titleAnimation = null;
+            final boolean collapsed = titleTextView.getTag() != null;
+            titleTextView.setTranslationY(collapsed ? dp(9.7f) : 0f);
+            getSubtitleTextView().setAlpha(collapsed ? 0f : 1f);
+            if (collapsed && getSubtitleTextView().getVisibility() != GONE) {
+                getSubtitleTextView().setVisibility(INVISIBLE);
+            }
+        }
+        if (parentFragment != null) {
+            NotificationCenter.getInstance(currentAccount).removeObserver(this, NotificationCenter.didUpdateConnectionState);
+            NotificationCenter.getGlobalInstance().removeObserver(this, NotificationCenter.emojiLoaded);
+            NotificationCenter.getInstance(currentAccount).removeObserver(this, NotificationCenter.updateInterfaces);
+            NotificationCenter.getGlobalInstance().removeObserver(this, NotificationCenter.dialogsNeedReload);
+            NotificationCenter.getInstance(currentAccount).removeObserver(this, NotificationCenter.chatInfoDidLoad);
+            NotificationCenter.getInstance(currentAccount).removeObserver(this, NotificationCenter.userInfoDidLoad);
+            if (parentFragment.getChatMode() == ChatActivity.MODE_SAVED) {
+                NotificationCenter.getInstance(currentAccount).removeObserver(this, NotificationCenter.savedMessagesDialogsUpdate);
+            }
+        }
+        if (emojiStatusDrawable != null) {
+            emojiStatusDrawable.detach();
+        }
+        if (botVerificationDrawable != null) {
+            botVerificationDrawable.detach();
+        }
+        if (badgeEmojiDrawable != null) {
+            badgeEmojiDrawable.detach();
+        }
+    }
+
+    @Override
+    public void didReceivedNotification(int id, int account, Object... args) {
+        if (id == NotificationCenter.didUpdateConnectionState) {
+            int state = ConnectionsManager.getInstance(currentAccount).getConnectionState();
+            if (currentConnectionState != state) {
+                currentConnectionState = state;
+                updateCurrentConnectionState();
+            }
+        } else if (id == NotificationCenter.emojiLoaded) {
+            if (titleTextView != null) {
+                titleTextView.invalidate();
+            }
+            if (getSubtitleTextView() != null) {
+                getSubtitleTextView().invalidate();
+            }
+            invalidate();
+        } else if (id == NotificationCenter.savedMessagesDialogsUpdate) {
+            updateSubtitle(true);
+        } else if (id == NotificationCenter.updateInterfaces || id == NotificationCenter.dialogsNeedReload
+                || id == NotificationCenter.chatInfoDidLoad || id == NotificationCenter.userInfoDidLoad) {
+            applyNimarkoBadge(false);
+        }
+    }
+
+    private void updateCurrentConnectionState() {
+        String title = null;
+        if (currentConnectionState == ConnectionsManager.ConnectionStateWaitingForNetwork) {
+            title = getString(R.string.WaitingForNetwork);
+        } else if (currentConnectionState == ConnectionsManager.ConnectionStateConnecting) {
+            title = getString(R.string.Connecting);
+        } else if (currentConnectionState == ConnectionsManager.ConnectionStateUpdating) {
+            title = getString(R.string.Updating);
+        } else if (currentConnectionState == ConnectionsManager.ConnectionStateConnectingToProxy) {
+            title = getString(R.string.ConnectingToProxy);
+        }
+        if (title == null) {
+            if (lastSubtitle != null) {
+                if (subtitleTextView != null) {
+                    CharSequence restoredSubtitle = lastSubtitle;
+                    lastSubtitle = null;
+                    setSubtitleTextSmooth(restoredSubtitle);
+                    subtitleTextView.restoreScrollingState(subtitleScrollingState);
+                    subtitleScrollingState = null;
+                    if (!subtitleTransitionRunning) applySubtitleColor();
+                } else if (animatedSubtitleTextView != null) {
+                    animatedSubtitleTextView.setText(lastSubtitle, !LocaleController.isRTL);
+                    lastSubtitle = null;
+                    if (overrideSubtitleColor != null) {
+                        animatedSubtitleTextView.setTextColor(overrideSubtitleColor);
+                    } else if (lastSubtitleColorKey >= 0) {
+                        animatedSubtitleTextView.setTextColor(getThemedColor(lastSubtitleColorKey));
+                        animatedSubtitleTextView.setTag(lastSubtitleColorKey);
+                    }
+                }
+            }
+            if (parentFragment != null && parentFragment.getCurrentChat() != null
+                    && parentFragment.getChatMode() == ChatActivity.MODE_DEFAULT
+                    && !parentFragment.isThreadChat()
+                    && !app.nimarkogram.messenger.NimarkoConfig.hideActionBarStatus) {
+                updateSubtitle(false);
+            }
+        } else {
+            if (subtitleTextView != null) {
+                if (lastSubtitle == null) {
+                    subtitleScrollingState = subtitleTextView.captureScrollingState();
+                    lastSubtitle = subtitleTransitionRunning ? subtitleTransitionTarget : subtitleTextView.getText();
+                    if (lastSubtitle == null) lastSubtitle = "";
+                }
+                setSubtitleTextSmooth(title);
+                if (!subtitleTransitionRunning) applySubtitleColor();
+            } else if (animatedSubtitleTextView != null) {
+                if (lastSubtitle == null) {
+                    lastSubtitle = animatedSubtitleTextView.getText();
+                }
+                animatedSubtitleTextView.setText(title, !LocaleController.isRTL);
+                if (overrideSubtitleColor != null) {
+                    animatedSubtitleTextView.setTextColor(overrideSubtitleColor);
+                } else {
+                    animatedSubtitleTextView.setTextColor(getThemedColor(Theme.key_actionBarDefaultSubtitle));
+                    animatedSubtitleTextView.setTag(Theme.key_actionBarDefaultSubtitle);
+                }
+            }
+        }
+        checkActionBar(true);
+    }
+
+    @Override
+    public void onInitializeAccessibilityNodeInfo(AccessibilityNodeInfo info) {
+        super.onInitializeAccessibilityNodeInfo(info);
+        StringBuilder sb = new StringBuilder();
+        sb.append(titleTextView.getText());
+        if (rightDrawableContentDescription != null) {
+            sb.append(", ");
+            sb.append(rightDrawableContentDescription);
+        }
+        if (rightDrawable2ContentDescription != null) {
+            sb.append(", ");
+            sb.append(rightDrawable2ContentDescription);
+        }
+        sb.append("\n");
+        if (subtitleTextView != null) {
+            sb.append(subtitleTextView.getText());
+        } else if (animatedSubtitleTextView != null) {
+            sb.append(animatedSubtitleTextView.getText());
+        }
+        info.setContentDescription(sb);
+        if (info.isClickable()) {
+            info.addAction(new AccessibilityNodeInfo.AccessibilityAction(
+                    AccessibilityNodeInfo.ACTION_CLICK,
+                    getString(R.string.OpenProfile)));
+        }
+        if (currentNimarkoBadge != null) {
+            info.addAction(new AccessibilityNodeInfo.AccessibilityAction(
+                    R.id.acc_action_badge_info, getString(R.string.NM_ProfileBadge)));
+        }
+    }
+
+    @Override
+    public boolean performAccessibilityAction(int action, Bundle arguments) {
+        if (action == R.id.acc_action_badge_info && currentNimarkoBadge != null) {
+            showNimarkoBadgeBulletin(currentNimarkoBadge);
+            return true;
+        }
+        return super.performAccessibilityAction(action, arguments);
+    }
+
+    public SharedMediaLayout.SharedMediaPreloader getSharedMediaPreloader() {
+        return sharedMediaPreloader;
+    }
+
+    public BackupImageView getAvatarImageView() {
+        return avatarImageView;
+    }
+
+    private int getThemedColor(int key) {
+        return Theme.getColor(key, resourcesProvider);
+    }
+
+    public void updateColors() {
+        if (titleTextView != null) {
+            titleTextView.setTextColor(getThemedColor(Theme.key_actionBarDefaultTitle));
+        }
+        if (subtitleTextView != null) {
+            subtitleTextView.setTextColor(getThemedColor(Theme.key_actionBarDefaultSubtitle));
+        }
+        if (animatedSubtitleTextView != null) {
+            animatedSubtitleTextView.setTextColor(getThemedColor(Theme.key_actionBarDefaultSubtitle));
+        }
+        if (currentTypingDrawable != null) {
+            currentTypingDrawable.setColor(getThemedColor(Theme.key_chat_status));
+        }
+        if (emojiStatusDefaultDrawable != null) {
+            emojiStatusDefaultDrawable.setColorFilter(new PorterDuffColorFilter(getThemedColor(Theme.key_profile_verifiedBackground), PorterDuff.Mode.MULTIPLY));
+        }
+        if (botVerificationDrawable != null) {
+            botVerificationDrawable.setColor(getThemedColor(Theme.key_profile_verifiedBackground));
+        }
+        if (emojiStatusDrawable != null) {
+            emojiStatusDrawable.setColor(getThemedColor(Theme.key_profile_verifiedBackground));
+        }
+        if (verifiedBackground != null) {
+            verifiedBackground.setColorFilter(new PorterDuffColorFilter(getThemedColor(Theme.key_profile_verifiedBackground), PorterDuff.Mode.MULTIPLY));
+        }
+        if (verifiedCheck != null) {
+            verifiedCheck.setColorFilter(new PorterDuffColorFilter(getThemedColor(Theme.key_profile_verifiedCheck), PorterDuff.Mode.MULTIPLY));
+        }
+        updateCommunityIndicatorStyle();
+        invalidate();
+    }
+
+    private ActionBar actionBar;
+
+    private float currentSubtitleTransitionWidth() {
+        return actionBar != null ? actionBar.getChatAvatarContainerWidth(ChatAvatarContainer.this)
+                : getVisualWidth();
+    }
+
+    public boolean hasSubtitleWidthTransition() {
+        return subtitleTransitionRunning;
+    }
+
+    public float getSubtitleWidthTransitionStart() {
+        return subtitleWidthTransitionStart;
+    }
+
+    public float getSubtitleWidthTransitionProgress() {
+        return subtitleTextView instanceof SubtitleTextView
+                ? ((SubtitleTextView) subtitleTextView).progress : 1f;
+    }
+    private void registerWithActionBarIfAttached() {
+        if (actionBar != null
+                && isAttachedToWindow()
+                && getParent() == actionBar
+                && getLayoutParams() != null) {
+            actionBar.setChatAvatarContainer(this);
+        }
+    }
+
+    public void setActionBar(ActionBar actionBar) {
+        if (this.actionBar == actionBar) {
+            registerWithActionBarIfAttached();
+            return;
+        }
+        if (this.actionBar != null) {
+            this.actionBar.clearChatAvatarContainer(this);
+        }
+        this.actionBar = actionBar;
+        registerWithActionBarIfAttached();
+    }
+
+    private void checkActionBar(boolean animated) {
+        if (actionBar != null) {
+            actionBar.checkAvatarContainerWidth(
+                    (animated || subtitleTransitionRunning || shouldUseCompactTitleIsland())
+                            && isLaidOut() && actionBar.isLaidOut());
+        }
+    }
+
+    public boolean hasVisibleAvatar() {
+        return avatarImageView != null && avatarImageView.getVisibility() == VISIBLE;
+    }
+
+    private float getInlineDesiredWidth(SimpleTextView view) {
+        if (view == null) {
+            return 0f;
+        }
+        final CharSequence text = view.getText();
+        final float textWidth = TextUtils.isEmpty(text)
+                ? 0f : view.getTextPaint().measureText(text, 0, text.length());
+        final float contentWidth = Math.max(0f, textWidth)
+                + view.getSideDrawablesSize();
+        return contentWidth + view.getPaddingLeft() + view.getPaddingRight();
+    }
+
+    public int getVisualWidth() {
+        float width = 0;
+
+        if (titleTextView != null) {
+            float titleWidth = getInlineDesiredWidth(titleTextView);
+            titleWidth += getInlineCommunityIndicatorSpace();
+            width = Math.max(width, titleWidth);
+        }
+        if (subtitleTextView != null && subtitleTextView.getVisibility() != GONE) {
+            final float subtitleWidth = getInlineDesiredWidth(subtitleTextView);
+            width = Math.max(width, hasSubtitleWidthTransition() ? subtitleWidth : Math.max(
+                    subtitleWidth,
+                    inlineSubtitleWidthReserve
+                            + subtitleTextView.getPaddingLeft()
+                            + subtitleTextView.getPaddingRight()));
+        }
+        if (isInlineCenteredAvatar() && hasVisibleAvatar()) {
+            final int avatarWidth = avatarImageView.getMeasuredWidth() > 0
+                    ? avatarImageView.getMeasuredWidth() : dp(avatarSizeInDp) - 2;
+            width += avatarWidth + dp(8) + dp(6) * 2;
+        } else if (hasVisibleAvatar()) {
+            width += dp(52 + 18);
+        } else {
+            width += dp(34);
+        }
+        return (int) Math.ceil(width);
+    }
+}

@@ -1,0 +1,1938 @@
+/* Modifications Copyright (C) 2026 Ettacent */
+
+package org.telegram.ui.Components;
+
+import app.nimarkogram.messenger.utils.ui.SystemTextPaint;
+import app.nimarkogram.messenger.utils.NimarkoTextMotionBlur;
+import app.nimarkogram.messenger.utils.NimarkoAppMotionBlur;
+import static org.telegram.messenger.AndroidUtilities.lerp;
+
+import android.animation.Animator;
+import android.animation.AnimatorListenerAdapter;
+import android.animation.TimeInterpolator;
+import android.animation.ValueAnimator;
+import app.nimarkogram.messenger.utils.NimarkoUiAnimationClock;
+import android.content.Context;
+import android.graphics.Canvas;
+import android.graphics.Bitmap;
+import android.graphics.Color;
+import android.graphics.ColorFilter;
+import android.graphics.LinearGradient;
+import android.graphics.Matrix;
+import android.graphics.Paint;
+import android.graphics.PixelFormat;
+import android.graphics.PorterDuff;
+import android.graphics.PorterDuffColorFilter;
+import android.graphics.PorterDuffXfermode;
+import android.graphics.Rect;
+import android.graphics.RectF;
+import android.graphics.Shader;
+import android.graphics.Typeface;
+import android.graphics.drawable.Drawable;
+import android.os.Build;
+import android.text.Layout;
+import android.text.StaticLayout;
+import android.text.TextPaint;
+import android.text.TextUtils;
+import android.util.Log;
+import android.util.Pair;
+import android.view.Gravity;
+import android.view.View;
+import android.view.ViewParent;
+import android.view.ViewTreeObserver;
+import android.view.accessibility.AccessibilityNodeInfo;
+
+import androidx.annotation.NonNull;
+import androidx.annotation.Nullable;
+import androidx.core.graphics.ColorUtils;
+
+import org.checkerframework.checker.units.qual.A;
+import org.checkerframework.checker.units.qual.C;
+import org.telegram.messenger.AndroidUtilities;
+import org.telegram.ui.ActionBar.Theme;
+
+import java.util.ArrayList;
+import java.lang.ref.WeakReference;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.List;
+import java.util.stream.IntStream;
+
+public class AnimatedTextView extends View {
+
+    public static class AnimatedTextDrawable extends Drawable {
+
+        private final TextPaint textPaint = new SystemTextPaint(Paint.ANTI_ALIAS_FLAG);
+        private final NimarkoTextMotionBlur.Budget motionBlurBudget = new NimarkoTextMotionBlur.Budget();
+        private int gravity = 0;
+
+        private boolean isRTL = false;
+
+        private float currentWidth, currentHeight;
+        private Part[] currentParts;
+        private CharSequence currentText;
+
+        private float oldWidth, oldHeight;
+        private Part[] oldParts;
+        private CharSequence oldText;
+        private int layoutWidth = Integer.MIN_VALUE;
+        private boolean emojiAttached = true;
+        public void setEmojiAttached(boolean attached) {
+            if (emojiAttached == attached) return;
+            emojiAttached = attached;
+            if (currentParts != null) {
+                for (Part part : currentParts) {
+                    if (attached) part.attach(); else part.detach();
+                }
+            }
+            if (oldParts != null) {
+                for (Part part : oldParts) {
+                    if (attached) part.attach(); else part.detach();
+                }
+            }
+        }
+
+        public void setSplitByWords(boolean b) {
+            splitByWords = b;
+        }
+
+        private class Part {
+
+            AnimatedEmojiSpan.EmojiGroupedSpans emoji;
+            View emojiHost;
+            StaticLayout layout;
+            float offset;
+            int toOppositeIndex;
+            float left, width;
+
+            NimarkoTextMotionBlur motionBlur;
+            public Part(StaticLayout layout, float offset, int toOppositeIndex) {
+                this.layout = layout;
+                this.toOppositeIndex = toOppositeIndex;
+                layout(offset);
+
+                attach();
+            }
+            public void attach() {
+                if (emojiAttached && emojiHost == null && getCallback() instanceof View) {
+                    emojiHost = (View) getCallback();
+                    emoji = AnimatedEmojiSpan.update(emojiCacheType, emojiHost, emoji, layout);
+                }
+            }
+
+            public void detach() {
+                if (motionBlur != null) {
+                    motionBlur.dispose();
+                    motionBlur = null;
+                }
+                if (emojiHost != null) {
+                    AnimatedEmojiSpan.release(emojiHost, emoji);
+                    emojiHost = null;
+                    emoji = null;
+                }
+            }
+
+            public void layout(float offset) {
+                this.offset = offset;
+                this.left = layout == null || layout.getLineCount() <= 0 ? 0 : layout.getLineLeft(0);
+                this.width = layout == null || layout.getLineCount() <= 0 ? 0 : layout.getLineWidth(0);
+            }
+
+            public void draw(Canvas canvas, float alpha) {
+                if (motionBlur != null && NimarkoTextMotionBlur.isMainThread() && (canvas.isHardwareAccelerated()
+                        || !NimarkoTextMotionBlur.featureEnabled())) motionBlur.reset();
+                drawContent(canvas, alpha);
+            }
+
+            public void drawMoving(Canvas canvas, float alpha, float x, float y, float sx, float sy) {
+                if (!NimarkoTextMotionBlur.isMainThread()
+                        || NimarkoTextMotionBlur.featureEnabled() && !canvas.isHardwareAccelerated()) {
+                    drawContent(canvas, alpha);
+                    return;
+                }
+                Canvas recording = null;
+                boolean enabled = NimarkoTextMotionBlur.enabled(canvas);
+                Drawable.Callback callback = getCallback();
+                if (enabled) {
+                    for (int depth = 0; callback instanceof Drawable && depth < 8; depth++) {
+                        callback = ((Drawable) callback).getCallback();
+                    }
+                }
+                boolean covered = enabled && callback instanceof View
+                        && NimarkoAppMotionBlur.isViewMotionBlurred((View) callback);
+                if (enabled && !covered) {
+                    if (motionBlur == null) motionBlur = new NimarkoTextMotionBlur();
+                    int pad = (int) Math.ceil(10f + (shadowed ? shadowRadius * 3f
+                            + Math.max(Math.abs(shadowDx), Math.abs(shadowDy)) : 0f));
+                    float baselineShift = stableBaseline ? -textPaint.ascent() - layout.getLineBaseline(0) : 0f;
+                    int l = (int) Math.floor(left) - pad;
+                    int top = (int) Math.floor(baselineShift) - pad;
+                    int w = (int) Math.ceil(left + width) + pad - l;
+                    int h = (int) Math.ceil(baselineShift + layout.getHeight()) + pad - top;
+                    recording = motionBlur.begin(canvas, motionBlurBudget, bounds.left + x, bounds.top + y,
+                            sx, sy, width / 2f, layout.getHeight() / 2f, l, top, w, h);
+                } else if (motionBlur != null) {
+                    motionBlur.reset();
+                }
+                if (recording == null) {
+                    drawContent(canvas, alpha);
+                } else {
+                    try {
+                        drawContent(recording, alpha);
+                    } finally {
+                        motionBlur.end(canvas);
+                    }
+                }
+            }
+
+            private void drawContent(Canvas canvas, float alpha) {
+                if (stableBaseline) {
+                    canvas.save();
+                    canvas.translate(0, -textPaint.ascent() - layout.getLineBaseline(0));
+                }
+                layout.draw(canvas);
+                AnimatedEmojiSpan.drawAnimatedEmojis(canvas, layout, emoji, 0, null, 0, 0, 0, alpha, emojiColorFilter);
+                if (stableBaseline) canvas.restore();
+            }
+        }
+
+        private int emojiCacheType = AnimatedEmojiDrawable.CACHE_TYPE_MESSAGES;
+        public void setEmojiCacheType(int cacheType) {
+            this.emojiCacheType = cacheType;
+        }
+
+        private float t = 0;
+        private boolean moveDown = true;
+        private ValueAnimator animator;
+        private Bitmap warmTextSnapshot;
+        private float warmTextWidth;
+        private float warmTextLayoutWidth;
+        private float warmTextAlignment;
+        private boolean warmTextCenterY;
+        private CharSequence deferredWarmText;
+        private boolean deferredWarmMoveDown;
+        private WeakReference<View> presentedOwner;
+        private float presentedT, presentedWidth;
+        private final Rect presentedBounds = new Rect();
+        private Part[] presentedParts, presentedOldParts;
+        private float presentedCurrentWidth, presentedOldWidth, presentedCurrentHeight, presentedOldHeight;
+        private boolean presentedRTL;
+        private int presentedGravity;
+        private boolean presentedIgnoreRTL, presentedCenterY;
+        private int presentedTextColor, presentedAlpha;
+        private ColorFilter presentedEmojiFilter;
+        private boolean hasHardwarePresentation;
+        private final Paint warmTextPaint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
+        private final Paint warmBlendPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final PorterDuffXfermode warmBlendMode = new PorterDuffXfermode(PorterDuff.Mode.ADD);
+        private WeakReference<View> animationOwner;
+        private boolean animationPaused;
+        private final NimarkoUiAnimationClock.ResumeGate animationResumeGate = value ->
+                canAnimate() && (value != animator || deferredWarmText == null);
+        private final ArrayList<Animator> visibilityPausedAnimators = new ArrayList<>(3);
+        private boolean animationOwnerDetached;
+        private ViewTreeObserver animationObserver;
+        private final ViewTreeObserver.OnPreDrawListener animationVisibility = () -> {
+            updateAnimationVisibility();
+            return true;
+        };
+        private final View.OnAttachStateChangeListener animationAttachment = new View.OnAttachStateChangeListener() {
+            @Override
+            public void onViewAttachedToWindow(View view) {
+                animationOwnerDetached = false;
+                observeAnimations();
+                updateAnimationVisibility();
+            }
+
+            @Override
+            public void onViewDetachedFromWindow(View view) {
+                final CharSequence latest = deferredWarmText;
+                final boolean moveDown = deferredWarmMoveDown;
+                clearWarmText();
+                animationOwnerDetached = true;
+                if (latest != null) {
+                    setText(latest, false, moveDown);
+                    view.requestLayout();
+                }
+                stopObservingFrames();
+                updateAnimationVisibility();
+            }
+        };
+
+        private boolean canAnimate() {
+            if (animationPaused || NimarkoUiAnimationClock.isPaused() || !isVisible()) return false;
+            if (!(getCallback() instanceof View)) return true;
+            View view = (View) getCallback();
+            if (animationOwnerDetached && animationOwner != null && animationOwner.get() == view) return false;
+            if (!view.isAttachedToWindow() || !view.isShown() || view.getWindowVisibility() != View.VISIBLE) return false;
+            while (view != null) {
+                if (view.getAlpha() <= 0f || view.getVisibility() != View.VISIBLE) return false;
+                ViewParent parent = view.getParent();
+                view = parent instanceof View ? (View) parent : null;
+            }
+            return true;
+        }
+
+        private void stopObservingFrames() {
+            if (animationObserver != null && animationObserver.isAlive()) {
+                animationObserver.removeOnPreDrawListener(animationVisibility);
+            }
+            animationObserver = null;
+        }
+
+        private void observeAnimations() {
+            final View owner = getCallback() instanceof View ? (View) getCallback() : null;
+            final View previous = animationOwner == null ? null : animationOwner.get();
+            if (previous != owner) {
+                final boolean changingOwner = animationOwner != null;
+                final CharSequence latest = changingOwner ? deferredWarmText : null;
+                final boolean moveDown = deferredWarmMoveDown;
+                if (changingOwner) clearWarmText();
+                stopObservingFrames();
+                if (previous != null) previous.removeOnAttachStateChangeListener(animationAttachment);
+                animationOwner = owner == null ? null : new WeakReference<>(owner);
+                animationOwnerDetached = owner != null && !owner.isAttachedToWindow();
+                if (owner != null) owner.addOnAttachStateChangeListener(animationAttachment);
+                if (latest != null) {
+                    setText(latest, false, moveDown);
+                    if (owner != null) owner.requestLayout();
+                    if (animator != null || colorAnimator != null || emojiColorAnimator != null) observeAnimations();
+                    return;
+                }
+            }
+            if (owner != null && owner.isAttachedToWindow() && animationObserver == null) {
+                animationObserver = owner.getViewTreeObserver();
+                animationObserver.addOnPreDrawListener(animationVisibility);
+            }
+        }
+
+        private void updateAnimationVisibility() {
+            if (animationOwner != null && animationOwner.get() != getCallback()) observeAnimations();
+            for (int i = visibilityPausedAnimators.size() - 1; i >= 0; i--) {
+                final Animator paused = visibilityPausedAnimators.get(i);
+                if (paused != animator && paused != colorAnimator && paused != emojiColorAnimator) {
+                    visibilityPausedAnimators.remove(i);
+                }
+            }
+            final boolean visible = canAnimate();
+            updateAnimatorVisibility(animator, visible && deferredWarmText == null);
+            updateAnimatorVisibility(colorAnimator, visible);
+            updateAnimatorVisibility(emojiColorAnimator, visible);
+            if (animator == null && colorAnimator == null && emojiColorAnimator == null && deferredWarmText == null) {
+                stopObservingFrames();
+                final View owner = animationOwner == null ? null : animationOwner.get();
+                if (owner != null) owner.removeOnAttachStateChangeListener(animationAttachment);
+                animationOwner = null;
+            }
+        }
+
+        private void updateAnimatorVisibility(Animator animation, boolean visible) {
+            if (animation == null || !animation.isStarted()) return;
+            if (!visible && !animation.isPaused()) {
+                if (!visibilityPausedAnimators.contains(animation)) visibilityPausedAnimators.add(animation);
+                animation.pause();
+            } else if (visible && visibilityPausedAnimators.remove(animation) && animation.isPaused()) {
+                if (!NimarkoUiAnimationClock.resumeAnimation(animation)) visibilityPausedAnimators.add(animation);
+            } else if (visible) {
+                NimarkoUiAnimationClock.resumeOwned(animation);
+            }
+        }
+
+        private void setAnimationPaused(boolean paused) {
+            animationPaused = paused;
+            updateAnimationVisibility();
+        }
+
+        private void trackAnimation(Animator animation) {
+            if (animation == null) return;
+            NimarkoUiAnimationClock.track(animation, animationResumeGate);
+            observeAnimations();
+            updateAnimationVisibility();
+        }
+
+        private void clearWarmText() {
+            deferredWarmText = null;
+            presentedOwner = null;
+            hasHardwarePresentation = false;
+            presentedParts = presentedOldParts = null;
+            if (warmTextSnapshot != null) {
+                warmTextSnapshot = null;
+            }
+        }
+
+        private boolean deferWarmText(CharSequence text, boolean animated, boolean moveDown) {
+            if (!animated || text == null || !(getCallback() instanceof View)) return false;
+            final View owner = (View) getCallback();
+            if (!owner.isAttachedToWindow() || !hasHardwarePresentation || presentedOwner == null
+                    || presentedOwner.get() != owner || canAnimate() && deferredWarmText == null) return false;
+            toSetText = null;
+            toSetTextMoveDown = false;
+            if (TextUtils.equals(text, currentText) && deferredWarmText == null) {
+                updateAnimationVisibility();
+                return true;
+            }
+            if (warmTextSnapshot == null || deferredWarmText == null) {
+                final int width = presentedBounds.width(), height = presentedBounds.height();
+                if (width <= 0 || height <= 0 || width > 2048 || height > 256 || (long) width * height > 262144) return false;
+                final Bitmap snapshot;
+                try {
+                    snapshot = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
+                } catch (OutOfMemoryError error) {
+                    return false;
+                }
+                final Canvas snapshotCanvas = new Canvas(snapshot);
+                snapshotCanvas.translate(-presentedBounds.left, -presentedBounds.top);
+                final float progress = t;
+                final Rect currentBounds = new Rect(bounds);
+                final Part[] parts = currentParts, previousParts = oldParts;
+                final float widthNow = currentWidth, widthBefore = oldWidth, heightNow = currentHeight, heightBefore = oldHeight;
+                final boolean rtl = isRTL;
+                final int savedGravity = gravity;
+                final boolean savedIgnoreRTL = ignoreRTL, savedCenterY = centerY;
+                final int color = textPaint.getColor(), opacity = alpha;
+                final ColorFilter emojiFilter = emojiColorFilter;
+                bounds.set(presentedBounds);
+                currentParts = presentedParts;
+                oldParts = presentedOldParts;
+                currentWidth = presentedCurrentWidth;
+                oldWidth = presentedOldWidth;
+                currentHeight = presentedCurrentHeight;
+                oldHeight = presentedOldHeight;
+                isRTL = presentedRTL;
+                gravity = presentedGravity;
+                ignoreRTL = presentedIgnoreRTL;
+                centerY = presentedCenterY;
+                textPaint.setColor(presentedTextColor);
+                alpha = presentedAlpha;
+                emojiColorFilter = presentedEmojiFilter;
+                t = presentedT;
+                try {
+                    draw(snapshotCanvas);
+                } finally {
+                    t = progress;
+                    bounds.set(currentBounds);
+                    currentParts = parts;
+                    oldParts = previousParts;
+                    currentWidth = widthNow;
+                    oldWidth = widthBefore;
+                    currentHeight = heightNow;
+                    oldHeight = heightBefore;
+                    isRTL = rtl;
+                    gravity = savedGravity;
+                    ignoreRTL = savedIgnoreRTL;
+                    centerY = savedCenterY;
+                    textPaint.setColor(color);
+                    alpha = opacity;
+                    emojiColorFilter = emojiFilter;
+                }
+                warmTextSnapshot = snapshot;
+                warmTextWidth = presentedWidth;
+                warmTextLayoutWidth = width;
+                warmTextAlignment = getHorizontalAlignment(presentedGravity, presentedRTL, presentedIgnoreRTL);
+                warmTextCenterY = presentedCenterY;
+            }
+            deferredWarmText = TextUtils.stringOrSpannedString(text);
+            deferredWarmMoveDown = moveDown;
+            updateAnimationVisibility();
+            observeAnimations();
+            invalidateSelf();
+            return true;
+        }
+
+        private void revealWarmText() {
+            final CharSequence latest = deferredWarmText;
+            deferredWarmText = null;
+            if (animator != null) {
+                animator.removeAllListeners();
+                animator.removeAllUpdateListeners();
+                animator.cancel();
+                animator = null;
+            }
+            clearOldParts();
+            oldText = null;
+            oldWidth = oldHeight = 0;
+            currentText = latest;
+            rebuildLayouts(overrideFullWidth > 0 ? overrideFullWidth : bounds.width());
+            moveDown = deferredWarmMoveDown;
+            startTextAnimator();
+        }
+        private CharSequence toSetText;
+        private boolean toSetTextMoveDown;
+
+        private long animateDelay = 0;
+        private long animateDuration = 320;
+        private TimeInterpolator animateInterpolator = CubicBezierInterpolator.EASE_OUT_QUINT;
+        private float animateWave = -1;
+        private float moveAmplitude = .3f;
+
+        private float scaleAmplitude = 0;
+        private boolean stableBaseline;
+        public void setStableBaseline(boolean enabled) {
+            stableBaseline = enabled;
+            invalidateSelf();
+        }
+        private float getDrawingHeight(float layoutHeight) {
+            return stableBaseline ? textPaint.descent() - textPaint.ascent() : layoutHeight;
+        }
+
+        private int alpha = 255;
+        private final Rect bounds = new Rect();
+
+        private boolean splitByWords;
+        private boolean preserveIndex;
+        private boolean startFromEnd;
+        private boolean enforceByLetter;
+        public void setHacks(boolean splitByWords, boolean preserveIndex, boolean startFromEnd) {
+            setHacks(splitByWords, preserveIndex, startFromEnd, false);
+        }
+        public void setHacks(boolean splitByWords, boolean preserveIndex, boolean startFromEnd, boolean enforceByLetter) {
+            this.splitByWords = splitByWords;
+            this.preserveIndex = preserveIndex;
+            this.startFromEnd = startFromEnd;
+            this.enforceByLetter = enforceByLetter;
+        }
+
+        private Runnable onAnimationFinishListener;
+        private boolean allowCancel;
+        public boolean ignoreRTL;
+        public boolean updateAll;
+
+        private int overrideFullWidth;
+        public void setOverrideFullWidth(int value) {
+            overrideFullWidth = value;
+        }
+
+        private float rightPadding;
+        private boolean ellipsizeByGradient;
+        private boolean fadeOverflow;
+        public void setFadeOverflow(boolean enabled) {
+            fadeOverflow = enabled;
+            invalidateSelf();
+        }
+        private LinearGradient ellipsizeGradient;
+        private Matrix ellipsizeGradientMatrix;
+        private Paint ellipsizePaint;
+
+        private boolean includeFontPadding = true;
+
+        public AnimatedTextDrawable() {
+            this(false, false, false);
+        }
+
+        public AnimatedTextDrawable(boolean splitByWords, boolean preserveIndex, boolean startFromEnd) {
+            this(splitByWords, preserveIndex, startFromEnd, false);
+        }
+
+        public AnimatedTextDrawable(boolean splitByWords, boolean preserveIndex, boolean startFromEnd, boolean enforceByLetter) {
+            this.splitByWords = splitByWords;
+            this.preserveIndex = preserveIndex;
+            this.startFromEnd = startFromEnd;
+            this.enforceByLetter = enforceByLetter;
+        }
+
+        public void setAllowCancel(boolean allowCancel) {
+            this.allowCancel = allowCancel;
+        }
+
+        public void setEllipsizeByGradient(boolean enabled) {
+            ellipsizeByGradient = enabled;
+            invalidateSelf();
+        }
+
+        public void setOnAnimationFinishListener(Runnable listener) {
+            onAnimationFinishListener = listener;
+        }
+
+        private void applyAlphaInternal(float t) {
+            textPaint.setAlpha((int) (alpha * t));
+            if (shadowed) {
+                textPaint.setShadowLayer(shadowRadius, shadowDx, shadowDy, Theme.multAlpha(shadowColor, t));
+            }
+        }
+
+        public boolean centerY = true;
+
+        private static boolean hasEllipsizedPart(Part[] parts) {
+            if (parts == null) {
+                return false;
+            }
+            for (Part part : parts) {
+                if (part != null && part.layout != null && part.layout.getLineCount() > 0
+                        && part.layout.getEllipsisCount(0) > 0) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        private boolean needsEllipsizeGradient() {
+            if (fadeOverflow) {
+                float available = Math.max(0, bounds.width() - rightPadding);
+                return currentWidth > available
+                        || (oldParts != null && t < 1f && oldWidth > available);
+            }
+            if (!ellipsizeByGradient) {
+                return false;
+            }
+            return hasEllipsizedPart(currentParts)
+                    || (oldParts != null && t < 1f && hasEllipsizedPart(oldParts));
+        }
+
+        private static float getHorizontalAlignment(int gravity, boolean rtl, boolean ignoreRTL) {
+            if ((gravity | ~Gravity.LEFT) == ~0) return 0f;
+            if ((gravity | ~Gravity.RIGHT) == ~0) return 1f;
+            if ((gravity | ~Gravity.CENTER_HORIZONTAL) == ~0) return .5f;
+            return rtl && !ignoreRTL ? 1f : 0f;
+        }
+        @Override
+        public void draw(@NonNull Canvas canvas) {
+            final boolean hardware = canvas.isHardwareAccelerated();
+            if (hardware && canAnimate() && deferredWarmText != null) revealWarmText();
+            if (warmTextSnapshot != null) {
+                final float progress = deferredWarmText == null ? t : 0f;
+                final float x = bounds.left + (bounds.width() - warmTextSnapshot.getWidth()) * warmTextAlignment;
+                final float y = bounds.top + (warmTextCenterY ? (bounds.height() - warmTextSnapshot.getHeight()) / 2f : 0f);
+                if (progress > 0f) canvas.saveLayer(Math.min(bounds.left, x), Math.min(bounds.top, y),
+                        Math.max(bounds.right, x + warmTextSnapshot.getWidth()),
+                        Math.max(bounds.bottom, y + warmTextSnapshot.getHeight()), null, Canvas.ALL_SAVE_FLAG);
+                warmTextPaint.setAlpha(Math.round(255 * (1f - progress)));
+                canvas.drawBitmap(warmTextSnapshot, x, y, warmTextPaint);
+                if (progress > 0f) {
+                    warmBlendPaint.setAlpha(Math.round(255 * progress));
+                    warmBlendPaint.setXfermode(warmBlendMode);
+                    canvas.saveLayer(bounds.left, bounds.top, bounds.right, bounds.bottom, warmBlendPaint, Canvas.ALL_SAVE_FLAG);
+                    drawText(canvas);
+                    canvas.restore();
+                    canvas.restore();
+                }
+            } else {
+                drawText(canvas);
+            }
+            if (hardware && canAnimate() && getCallback() instanceof View) {
+                hasHardwarePresentation = true;
+                if (presentedOwner == null || presentedOwner.get() != getCallback()) {
+                    presentedOwner = new WeakReference<>((View) getCallback());
+                }
+                presentedT = t;
+                presentedWidth = getCurrentWidth();
+                presentedBounds.set(bounds);
+                presentedParts = currentParts;
+                presentedOldParts = oldParts;
+                presentedCurrentWidth = currentWidth;
+                presentedOldWidth = oldWidth;
+                presentedCurrentHeight = currentHeight;
+                presentedOldHeight = oldHeight;
+                presentedRTL = isRTL;
+                presentedGravity = gravity;
+                presentedIgnoreRTL = ignoreRTL;
+                presentedCenterY = centerY;
+                presentedTextColor = ColorUtils.setAlphaComponent(textPaint.getColor(), alpha);
+                presentedAlpha = alpha;
+                presentedEmojiFilter = emojiColorFilter;
+            }
+        }
+
+        private void drawText(@NonNull Canvas canvas) {
+            motionBlurBudget.start();
+            final boolean drawEllipsizeGradient = needsEllipsizeGradient();
+            if (drawEllipsizeGradient) {
+                AndroidUtilities.rectTmp.set(bounds);
+                AndroidUtilities.rectTmp.right -= rightPadding;
+                canvas.saveLayerAlpha(AndroidUtilities.rectTmp, 255, Canvas.ALL_SAVE_FLAG);
+                if (fadeOverflow) {
+                    canvas.clipRect(AndroidUtilities.rectTmp);
+                }
+            }
+            canvas.save();
+            canvas.translate(bounds.left, bounds.top);
+            int fullWidth = bounds.width();
+            int fullHeight = bounds.height();
+            if (currentParts != null && oldParts != null && t != 1) {
+                float width = lerp(oldWidth, currentWidth, t);
+                float height = getDrawingHeight(lerp(oldHeight, currentHeight, t));
+                float centerOffset = centerY ? (fullHeight - height) / 2f : 0f;
+                if (centerY) canvas.translate(0, (fullHeight - height) / 2f);
+                for (int i = 0; i < currentParts.length; ++i) {
+                    Part current = currentParts[i];
+                    int j = current.toOppositeIndex;
+                    float x = current.offset, y = 0;
+                    if (isRTL && !ignoreRTL) {
+                        x = currentWidth - (x + current.width);
+                    }
+                    float localT = t;
+                    if (animateWave > 0) {
+                        localT = AndroidUtilities.cascade(t, i, currentParts.length, animateWave);
+                    }
+                    if (j >= 0) {
+                        Part old = oldParts[j];
+                        float oldX = old.offset;
+                        if (isRTL && !ignoreRTL) {
+                            oldX = oldWidth - (oldX + old.width);
+                        }
+                        x = lerp(oldX - old.left, x - current.left, t);
+                        applyAlphaInternal(1f);
+                    } else {
+                        x -= current.left;
+                        y = -textPaint.getTextSize() * moveAmplitude * (1f - localT) * (moveDown ? 1f : -1f);
+                        applyAlphaInternal(localT);
+                    }
+                    canvas.save();
+                    float lwidth = j >= 0 ? width : currentWidth;
+                    if ((gravity | ~Gravity.LEFT) != ~0) {
+                        if ((gravity | ~Gravity.RIGHT) == ~0) {
+                            x += fullWidth - lwidth;
+                        } else if ((gravity | ~Gravity.CENTER_HORIZONTAL) == ~0) {
+                            x += (fullWidth - lwidth) / 2f;
+                        } else if (isRTL && !ignoreRTL) {
+                            x += fullWidth - lwidth;
+                        }
+                    }
+                    canvas.translate(x, y);
+                    float scaleX = 1f, scaleY = 1f;
+                    if (j < 0 && scaleAmplitude > 0) {
+                        final float s = lerp(1f - scaleAmplitude, 1f, t);
+                        scaleX = s;
+                        scaleY = stableBaseline ? 1f : s;
+                        canvas.scale(s, stableBaseline ? 1f : s, current.width / 2f, current.layout.getHeight() / 2f);
+                    }
+                    current.drawMoving(canvas, j >= 0 ? 1f : t, x, y + centerOffset, scaleX, scaleY);
+                    canvas.restore();
+                }
+                for (int i = 0; i < oldParts.length; ++i) {
+                    Part old = oldParts[i];
+                    int j = old.toOppositeIndex;
+                    if (j >= 0) {
+                        continue;
+                    }
+                    float localT = t;
+                    if (animateWave > 0) {
+                        localT = AndroidUtilities.cascade(t, i, oldParts.length, animateWave);
+                    }
+                    float x = old.offset;
+                    float y = textPaint.getTextSize() * moveAmplitude * localT * (moveDown ? 1f : -1f);
+                    applyAlphaInternal(1f - localT);
+                    canvas.save();
+                    if (isRTL && !ignoreRTL) {
+                        x = oldWidth - (x + old.width);
+                    }
+                    x -= old.left;
+                    if ((gravity | ~Gravity.LEFT) != ~0) {
+                        if ((gravity | ~Gravity.RIGHT) == ~0) {
+                            x += fullWidth - oldWidth;
+                        } else if ((gravity | ~Gravity.CENTER_HORIZONTAL) == ~0) {
+                            x += (fullWidth - oldWidth) / 2f;
+                        } else if (isRTL && !ignoreRTL) {
+                            x += fullWidth - oldWidth;
+                        }
+                    }
+                    canvas.translate(x, y);
+                    float scaleX = 1f, scaleY = 1f;
+                    if (scaleAmplitude > 0) {
+                        final float s = lerp(1f, 1f - scaleAmplitude, t);
+                        scaleX = s;
+                        scaleY = stableBaseline ? 1f : s;
+                        canvas.scale(s, stableBaseline ? 1f : s, old.width / 2f, old.layout.getHeight() / 2f);
+                    }
+                    old.drawMoving(canvas, 1f - localT, x, y + centerOffset, scaleX, scaleY);
+                    canvas.restore();
+                }
+            } else {
+                if (centerY) canvas.translate(0, (fullHeight - getDrawingHeight(currentHeight)) / 2f);
+                if (currentParts != null) {
+                    applyAlphaInternal(1f);
+                    for (int i = 0; i < currentParts.length; ++i) {
+                        canvas.save();
+                        Part current = currentParts[i];
+                        float x = current.offset;
+                        if (isRTL && !ignoreRTL) {
+                            x = currentWidth - (x + current.width);
+                        }
+                        x -= current.left;
+                        if ((gravity | ~Gravity.LEFT) != ~0) {
+                            if ((gravity | ~Gravity.RIGHT) == ~0) {
+                                x += fullWidth - currentWidth;
+                            } else if ((gravity | ~Gravity.CENTER_HORIZONTAL) == ~0) {
+                                x += (fullWidth - currentWidth) / 2f;
+                            } else if (isRTL && !ignoreRTL) {
+                                x += fullWidth - currentWidth;
+                            }
+                        }
+                        canvas.translate(x, 0);
+                        current.draw(canvas, 1f);
+                        canvas.restore();
+                    }
+                }
+            }
+            canvas.restore();
+            if (drawEllipsizeGradient) {
+                final float w = AndroidUtilities.dp(16);
+                if (ellipsizeGradient == null) {
+                    ellipsizeGradient = new LinearGradient(0, 0, w, 0, new int[] {0x00ff0000, 0xffff0000}, new float[] {0, 1}, Shader.TileMode.CLAMP);
+                    ellipsizeGradientMatrix = new Matrix();
+                    ellipsizePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+                    ellipsizePaint.setShader(ellipsizeGradient);
+                    ellipsizePaint.setXfermode(new PorterDuffXfermode(PorterDuff.Mode.DST_OUT));
+                }
+                ellipsizeGradientMatrix.reset();
+                final boolean fadeLeft = fadeOverflow && isRTL && !ignoreRTL;
+                if (fadeLeft) {
+                    ellipsizeGradientMatrix.setScale(-1, 1);
+                    ellipsizeGradientMatrix.postTranslate(bounds.left + w, 0);
+                } else {
+                    ellipsizeGradientMatrix.postTranslate(bounds.right - rightPadding - w, 0);
+                }
+                ellipsizeGradient.setLocalMatrix(ellipsizeGradientMatrix);
+                if (fadeOverflow) {
+                    float available = Math.max(0, bounds.width() - rightPadding);
+                    float strength = Math.max(0f, Math.min(1f, (currentWidth - available) / w));
+                    if (oldParts != null) {
+                        float oldStrength = Math.max(0f, Math.min(1f, (oldWidth - available) / w));
+                        strength = lerp(oldStrength, strength, t);
+                    }
+                    ellipsizePaint.setAlpha(Math.round(255 * strength));
+                } else {
+                    ellipsizePaint.setAlpha(255);
+                }
+                canvas.drawRect(fadeLeft ? bounds.left : bounds.right - rightPadding - w,
+                        bounds.top, fadeLeft ? bounds.left + w : bounds.right - rightPadding + AndroidUtilities.dp(1),
+                        bounds.bottom, ellipsizePaint);
+                canvas.restore();
+            }
+        }
+
+        public void setRightPadding(float rightPadding) {
+            this.rightPadding = rightPadding;
+            invalidateSelf();
+        }
+
+        public float getRightPadding() {
+            return this.rightPadding;
+        }
+
+        public void cancelAnimation() {
+            final CharSequence latest = getText();
+            cancelAnimationInternal();
+            if (!TextUtils.equals(latest, currentText)) {
+                currentText = latest;
+                rebuildLayouts(overrideFullWidth > 0 ? overrideFullWidth : bounds.width());
+            }
+            invalidateSelf();
+            if (widthUpdatedListener != null) {
+                widthUpdatedListener.run();
+            }
+        }
+        private void cancelAnimationInternal() {
+            clearWarmText();
+            resetCurrentMotionBlur();
+            toSetText = null;
+            toSetTextMoveDown = false;
+            if (animator != null) {
+                animator.removeAllListeners();
+                animator.removeAllUpdateListeners();
+                animator.cancel();
+                animator = null;
+            }
+            clearOldParts();
+            oldText = null;
+            oldWidth = oldHeight = 0;
+            t = 0;
+            updateAnimationVisibility();
+        }
+
+        public boolean isAnimating() {
+            return animator != null && animator.isStarted();
+        }
+
+        public void setText(CharSequence text) {
+            setText(text, true);
+        }
+
+        public void setText(CharSequence text, boolean animated) {
+            setText(text, animated, true);
+        }
+
+        public void setText(CharSequence text, boolean animated, boolean moveDown) {
+            if (deferWarmText(text, animated, moveDown)) return;
+            if (!animated || text == null) clearWarmText();
+            if (!canAnimate()) {
+                toSetText = null;
+                toSetTextMoveDown = false;
+                if (animated && TextUtils.equals(text == null ? "" : text, currentText)) {
+                    updateAnimationVisibility();
+                    return;
+                }
+                animated = false;
+            }
+            if (this.currentText == null || text == null) {
+                animated = false;
+            }
+            if (text == null) {
+                text = "";
+            }
+            final int width = overrideFullWidth > 0 ? overrideFullWidth : bounds.width();
+            if (animated) {
+                if (TextUtils.equals(text, currentText)) {
+                    toSetText = null;
+                    toSetTextMoveDown = false;
+                    return;
+                }
+
+                if (allowCancel) {
+                    cancelAnimationInternal();
+                } else if (isAnimating()) {
+                    toSetText = text;
+                    toSetTextMoveDown = moveDown;
+                    return;
+                }
+
+                oldText = currentText;
+                currentText = text;
+                rebuildLayouts(width);
+                this.moveDown = moveDown;
+                startTextAnimator();
+            } else {
+                cancelAnimationInternal();
+                if (!text.equals(currentText) || currentParts == null || layoutWidth != width) {
+                    currentText = text;
+                    rebuildLayouts(width);
+                }
+
+                clearOldParts();
+                oldText = null;
+                oldWidth = 0;
+                oldHeight = 0;
+
+                invalidateSelf();
+                if (widthUpdatedListener != null) {
+                    widthUpdatedListener.run();
+                }
+            }
+        }
+
+        private void startTextAnimator() {
+            final ValueAnimator textAnimator = ValueAnimator.ofFloat(t = 0f, 1f);
+            animator = textAnimator;
+            textAnimator.addUpdateListener(anm -> {
+                t = (float) anm.getAnimatedValue();
+                invalidateSelf();
+                if (widthUpdatedListener != null) {
+                    widthUpdatedListener.run();
+                }
+            });
+            textAnimator.addListener(new AnimatorListenerAdapter() {
+                @Override
+                public void onAnimationEnd(Animator animation) {
+                    if (animator != animation) {
+                        return;
+                    }
+                    animator = null;
+                    clearWarmText();
+                    updateAnimationVisibility();
+                    resetCurrentMotionBlur();
+                    clearOldParts();
+                    oldText = null;
+                    oldWidth = oldHeight = 0;
+                    t = 0;
+                    final CharSequence nextText = toSetText;
+                    final boolean nextMoveDown = toSetTextMoveDown;
+                    toSetText = null;
+                    toSetTextMoveDown = false;
+                    final CharSequence finishedText = currentText;
+                    invalidateSelf();
+                    if (widthUpdatedListener != null) {
+                        widthUpdatedListener.run();
+                    }
+                    if (animator != null || currentText != finishedText) {
+                        return;
+                    }
+                    if (nextText != null) {
+                        setText(nextText, true, nextMoveDown);
+                    } else if (onAnimationFinishListener != null) {
+                        onAnimationFinishListener.run();
+                    }
+                }
+            });
+            textAnimator.setStartDelay(animateDelay);
+            textAnimator.setDuration(animateDuration);
+            textAnimator.setInterpolator(animateInterpolator);
+            textAnimator.start();
+            trackAnimation(textAnimator);
+            if (animator == textAnimator && widthUpdatedListener != null) {
+                widthUpdatedListener.run();
+            }
+        }
+        private void updateLayoutWidth() {
+            final int width = overrideFullWidth > 0 ? overrideFullWidth : bounds.width();
+            if (!fadeOverflow && currentText != null && layoutWidth != width) {
+                rebuildLayouts(width);
+                invalidateSelf();
+            }
+        }
+        private void rebuildLayouts(final int width) {
+            layoutWidth = width;
+            if (currentText == null) {
+                return;
+            }
+            isRTL = AndroidUtilities.isRTL(currentText);
+            if (oldText == null) {
+                final Part part = new Part(makeLayout(currentText, width), 0, -1);
+                clearCurrentParts();
+                currentParts = new Part[] { part };
+                currentWidth = part.width;
+                currentHeight = part.layout.getHeight();
+                return;
+            }
+            ArrayList<Part> currentParts = new ArrayList<>();
+            ArrayList<Part> oldParts = new ArrayList<>();
+            currentWidth = currentHeight = 0;
+            oldWidth = oldHeight = 0;
+            RegionCallback onEqualRegion = (part, from, to) -> {
+                StaticLayout layout = makeLayout(part, width - (int) Math.ceil(Math.min(currentWidth, oldWidth)));
+                final Part currentPart = new Part(layout, currentWidth, oldParts.size());
+                final Part oldPart = new Part(layout, oldWidth, currentParts.size());
+                currentParts.add(currentPart);
+                oldParts.add(oldPart);
+                currentWidth += currentPart.width;
+                oldWidth += currentPart.width;
+                currentHeight = Math.max(currentHeight, layout.getHeight());
+                oldHeight = Math.max(oldHeight, layout.getHeight());
+            };
+            RegionCallback onNewPart = (part, from, to) -> {
+                StaticLayout layout = makeLayout(part, width - (int) Math.ceil(currentWidth));
+                final Part currentPart = new Part(layout, currentWidth, -1);
+                currentParts.add(currentPart);
+                currentWidth += currentPart.width;
+                currentHeight = Math.max(currentHeight, layout.getHeight());
+            };
+            RegionCallback onOldPart = (part, from, to) -> {
+                StaticLayout layout = makeLayout(part, width - (int) Math.ceil(oldWidth));
+                final Part oldPart = new Part(layout, oldWidth, -1);
+                oldParts.add(oldPart);
+                oldWidth += oldPart.width;
+                oldHeight = Math.max(oldHeight, layout.getHeight());
+            };
+            CharSequence from = splitByWords ? new WordSequence(oldText) : oldText;
+            CharSequence to = splitByWords ? new WordSequence(currentText) : currentText;
+            diff(from, to, onEqualRegion, onNewPart, onOldPart);
+            clearCurrentParts();
+            clearOldParts();
+            this.currentParts = currentParts.toArray(new Part[currentParts.size()]);
+            this.oldParts = oldParts.toArray(new Part[oldParts.size()]);
+        }
+
+        private void clearOldParts() {
+            if (oldParts != null) {
+                for (int i = 0; i < oldParts.length; ++i) {
+                    oldParts[i].detach();
+                }
+            }
+            oldParts = null;
+        }
+
+        private void resetCurrentMotionBlur() {
+            if (currentParts != null) {
+                for (Part part : currentParts) {
+                    if (part.motionBlur != null) part.motionBlur.reset();
+                }
+            }
+        }
+
+        private void clearCurrentParts() {
+            if (currentParts != null) {
+                for (int i = 0; i < currentParts.length; ++i) {
+                    currentParts[i].detach();
+                }
+            }
+            currentParts = null;
+        }
+
+        public CharSequence getText() {
+            return deferredWarmText != null ? deferredWarmText : toSetText != null ? toSetText : currentText;
+        }
+
+        public float getWidth() {
+            if (warmTextSnapshot != null) return Math.max(warmTextLayoutWidth, currentWidth);
+            return Math.max(currentWidth, oldWidth);
+        }
+
+        public float getCurrentWidth() {
+            if (warmTextSnapshot != null) return deferredWarmText != null ? warmTextWidth : lerp(warmTextWidth, currentWidth, t);
+            if (currentParts != null && oldParts != null) {
+                return lerp(oldWidth, currentWidth, t);
+            }
+            return currentWidth;
+        }
+
+        public float getAnimateToWidth() {
+            return currentWidth;
+        }
+        public float getCurrentWidth(float maxWidth) {
+            float limit = Math.max(0, maxWidth);
+            float target = Math.min(currentWidth, limit);
+            if (warmTextSnapshot != null) return deferredWarmText != null ? Math.min(warmTextWidth, limit) : lerp(Math.min(warmTextWidth, limit), target, t);
+            if (currentParts != null && oldParts != null) {
+                return lerp(Math.min(oldWidth, limit), target, t);
+            }
+            return target;
+        }
+
+        public float getMaxWidth(AnimatedTextDrawable otherTextDrawable) {
+            if (oldParts == null || otherTextDrawable.oldParts == null) {
+                return Math.max(getCurrentWidth(), otherTextDrawable.getCurrentWidth());
+            }
+            return lerp(
+                Math.max(oldWidth, otherTextDrawable.oldWidth),
+                Math.max(currentWidth, otherTextDrawable.currentWidth),
+                Math.max(t, otherTextDrawable.t)
+            );
+        }
+
+        public float getHeight() {
+            return currentHeight;
+        }
+
+        private StaticLayout makeLayout(CharSequence textPart, int width) {
+            if (fadeOverflow) {
+                width = Math.max(1, (int) Math.ceil(Layout.getDesiredWidth(textPart, textPaint)) + 1);
+            }
+            if (width <= 0) {
+                width = Math.min(AndroidUtilities.displaySize.x, AndroidUtilities.displaySize.y);
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                return StaticLayout.Builder.obtain(textPart, 0, textPart.length(), textPaint, width)
+                        .setMaxLines(1)
+                        .setLineSpacing(0, 1)
+                        .setAlignment(Layout.Alignment.ALIGN_NORMAL)
+                        .setEllipsize(TextUtils.TruncateAt.END)
+                        .setEllipsizedWidth(width)
+                        .setIncludePad(includeFontPadding)
+                        .build();
+            } else {
+                return new StaticLayout(
+                    textPart,
+                    0, textPart.length(),
+                    textPaint,
+                    width,
+                    Layout.Alignment.ALIGN_NORMAL,
+                    1,
+                    0,
+                    includeFontPadding,
+                    TextUtils.TruncateAt.END,
+                    width
+                );
+            }
+        }
+
+        private static class WordSequence implements CharSequence {
+            private static final char SPACE = ' ';
+
+            private final CharSequence[] words;
+            private final int length;
+
+            public WordSequence(CharSequence text) {
+                if (text == null) {
+                    words = new CharSequence[0];
+                    length = 0;
+                    return;
+                }
+                length = text.length();
+                int spacesCount = 0;
+                for (int i = 0; i < length; ++i) {
+                    if (text.charAt(i) == SPACE) {
+                        spacesCount++;
+                    }
+                }
+                int j = 0;
+                words = new CharSequence[spacesCount + 1];
+                int start = 0;
+                for (int i = 0; i <= length; ++i) {
+                    if (i == length || text.charAt(i) == SPACE) {
+                        words[j++] = text.subSequence(start, i + (i < length ? 1 : 0));
+                        start = i + 1;
+                    }
+                }
+            }
+
+            public WordSequence(CharSequence[] words) {
+                if (words == null) {
+                    this.words = new CharSequence[0];
+                    length = 0;
+                    return;
+                }
+                this.words = words;
+                int length = 0;
+                for (int i = 0; i < this.words.length; ++i) {
+                    if (this.words[i] != null) {
+                        length += this.words[i].length();
+                    }
+                }
+                this.length = length;
+            }
+
+            public CharSequence wordAt(int i) {
+                if (i < 0 || i >= words.length) {
+                    return null;
+                }
+                return words[i];
+            }
+
+            @Override
+            public int length() {
+                return words.length;
+            }
+
+            @Override
+            public char charAt(int i) {
+                for (int j = 0; j < words.length; ++j) {
+                    if (i < words[j].length())
+                        return words[j].charAt(i);
+                    i -= words[j].length();
+                }
+                return 0;
+            }
+
+            @NonNull
+            @Override
+            public CharSequence subSequence(int from, int to) {
+                return TextUtils.concat(Arrays.copyOfRange(words, from, to));
+            }
+
+            @Override
+            @NonNull
+            public String toString() {
+                StringBuilder sb = new StringBuilder();
+                for (int i = 0; i < words.length; ++i) {
+                    sb.append(words[i]);
+                }
+                return sb.toString();
+            }
+
+            public CharSequence toCharSequence() {
+                return TextUtils.concat(words);
+            }
+
+            @Override
+            public IntStream chars() {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                    return toCharSequence().chars();
+                }
+                return null;
+            }
+
+            @Override
+            public IntStream codePoints() {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                    return toCharSequence().codePoints();
+                }
+                return null;
+            }
+        }
+
+        public static boolean partEquals(CharSequence a, CharSequence b, int aIndex, int bIndex) {
+            if (a instanceof WordSequence && b instanceof WordSequence) {
+                CharSequence wordA = ((WordSequence) a).wordAt(aIndex);
+                CharSequence wordB = ((WordSequence) b).wordAt(bIndex);
+                return wordA == null && wordB == null || wordA != null && wordA.equals(wordB);
+            }
+            return (a == null && b == null || a != null && b != null && a.charAt(aIndex) == b.charAt(bIndex));
+        }
+
+        private void betterDiff(final CharSequence oldText, final CharSequence newText,
+                                RegionCallback onEqualPart, RegionCallback onNewPart, RegionCallback onOldPart) {
+            int m = oldText.length();
+            int n = newText.length();
+
+            int[][] dp = new int[m+1][n+1];
+            for (int i = 0; i <= m; i++) {
+                for (int j = 0; j <= n; j++) {
+                    if (i == 0 || j == 0)
+                        dp[i][j] = 0;
+                    else if (partEquals(oldText, newText, i - 1, j - 1))
+                        dp[i][j] = dp[i - 1][j - 1] + 1;
+                    else
+                        dp[i][j] = Math.max(dp[i - 1][j], dp[i][j - 1]);
+                }
+            }
+
+            List<Runnable> parts = new ArrayList<>();
+            int i = m, j = n;
+            while (i > 0 && j > 0) {
+                if (partEquals(oldText, newText, i - 1, j - 1)) {
+                    int start = i-1;
+                    while (i > 1 && j > 1 && partEquals(oldText, newText, i - 2, j - 2)) {
+                        i--;
+                        j--;
+                    }
+                    final int end = i - 1;
+                    parts.add(() -> onEqualPart.run(oldText.subSequence(end, start + 1), end, start + 1));
+                    i--;
+                    j--;
+                } else if (dp[i - 1][j] > dp[i][j - 1]) {
+                    int start = i-1;
+                    while (i > 1 && dp[i - 2][j] > dp[i - 1][j - 1]) {
+                        i--;
+                    }
+                    final int end = i - 1;
+                    parts.add(() -> onOldPart.run(oldText.subSequence(end, start + 1), end, start + 1));
+                    i--;
+                } else {
+                    int start = j - 1;
+                    while (j > 1 && dp[i][j - 2] > dp[i - 1][j - 1]) {
+                        j--;
+                    }
+                    final int end = j - 1;
+                    parts.add(() -> onNewPart.run(newText.subSequence(end, start + 1), end, start + 1));
+                    j--;
+                }
+            }
+
+            while (i > 0) {
+                final int start = i - 1;
+                while (i > 1 && dp[i - 2][j] >= dp[i - 1][j]) {
+                    i--;
+                }
+                final int end = i - 1;
+                parts.add(() -> onOldPart.run(oldText.subSequence(end, start + 1), end, start + 1));
+                i--;
+            }
+            while (j > 0) {
+                final int start = j - 1;
+                while (j > 1 && dp[i][j - 2] >= dp[i][j - 1]) {
+                    j--;
+                }
+                final int end = j - 1;
+                parts.add(() -> onNewPart.run(newText.subSequence(end, start + 1), end, start + 1));
+                j--;
+            }
+
+            Collections.reverse(parts);
+            for (Runnable part : parts) {
+                part.run();
+            }
+        }
+
+        private void part(RegionCallback onPart, CharSequence text, int start, int end) {
+            if (enforceByLetter && text.length() > 1) {
+                for (int i = 0; i < text.length(); ++i) {
+                    onPart.run(text.subSequence(i, i + 1), start + i, start + i + 1);
+                }
+                return;
+            }
+            onPart.run(text, start, end);
+        }
+
+        private void diff(final CharSequence oldText, final CharSequence newText, RegionCallback onEqualPart, RegionCallback onNewPart, RegionCallback onOldPart) {
+            if (updateAll) {
+                part(onOldPart, oldText, 0, oldText.length());
+                part(onNewPart, newText, 0, newText.length());
+                return;
+            }
+            if (preserveIndex) {
+                boolean equal = true;
+                int start = 0;
+                int minLength = Math.min(newText.length(), oldText.length());
+                if (startFromEnd) {
+                    ArrayList<Integer> indexes = new ArrayList<>();
+                    boolean eq = true;
+                    for (int i = 0; i <= minLength; ++i) {
+                        int a = newText.length() - i - 1;
+                        int b = oldText.length() - i - 1;
+                        boolean thisEqual = a >= 0 && b >= 0 && partEquals(newText, oldText, a, b);
+                        if (equal != thisEqual || i == minLength) {
+                            if (i - start > 0) {
+                                if (indexes.size() == 0) {
+                                    eq = equal;
+                                }
+                                indexes.add(i - start);
+                            }
+                            equal = thisEqual;
+                            start = i;
+                        }
+                    }
+                    int a = newText.length() - minLength;
+                    int b = oldText.length() - minLength;
+                    if (a > 0) {
+                        part(onNewPart, newText.subSequence(0, a), 0, a);
+                    }
+                    if (b > 0) {
+                        part(onOldPart, oldText.subSequence(0, b), 0, b);
+                    }
+                    for (int i = indexes.size() - 1; i >= 0; --i) {
+                        int count = indexes.get(i);
+                        if ((i % 2 == 0) == eq) {
+                            if (newText.length() > oldText.length()) {
+                                onEqualPart.run(newText.subSequence(a, a + count), a, a + count);
+                            } else {
+                                onEqualPart.run(oldText.subSequence(b, b + count), b, b + count);
+                            }
+                        } else {
+                            part(onNewPart, newText.subSequence(a, a + count), a, a + count);
+                            part(onOldPart, oldText.subSequence(b, b + count), b, b + count);
+                        }
+                        a += count;
+                        b += count;
+                    }
+                } else {
+                    for (int i = 0; i <= minLength; ++i) {
+                        boolean thisEqual = i < minLength && partEquals(newText, oldText, i, i);
+                        if (equal != thisEqual || i == minLength) {
+                            if (i - start > 0) {
+                                if (equal) {
+                                    part(onEqualPart, newText.subSequence(start, i), start, i);
+                                } else {
+                                    part(onNewPart, newText.subSequence(start, i), start, i);
+                                    part(onOldPart, oldText.subSequence(start, i), start, i);
+                                }
+                            }
+                            equal = thisEqual;
+                            start = i;
+                        }
+                    }
+                    if (newText.length() - minLength > 0) {
+                        part(onNewPart, newText.subSequence(minLength, newText.length()), minLength, newText.length());
+                    }
+                    if (oldText.length() - minLength > 0) {
+                        part(onOldPart, oldText.subSequence(minLength, oldText.length()), minLength, oldText.length());
+                    }
+                }
+            } else {
+                int astart = 0, bstart = 0;
+                boolean equal = true;
+                int a = 0, b = 0;
+                int minLength = Math.min(newText.length(), oldText.length());
+                for (; a <= minLength; ++a) {
+                    boolean thisEqual = a < minLength && partEquals(newText, oldText, a, b);
+                    if (equal != thisEqual || a == minLength) {
+                        if (a == minLength) {
+                            a = newText.length();
+                            b = oldText.length();
+                        }
+                        int alen = a - astart, blen = b - bstart;
+                        if (alen > 0 || blen > 0) {
+                            if (alen == blen && equal) {
+                                onEqualPart.run(newText.subSequence(astart, a), astart, a);
+                            } else {
+                                if (alen > 0) {
+                                    part(onNewPart, newText.subSequence(astart, a), astart, a);
+                                }
+                                if (blen > 0) {
+                                    part(onOldPart, oldText.subSequence(bstart, b), bstart, b);
+                                }
+                            }
+                        }
+                        equal = thisEqual;
+                        astart = a;
+                        bstart = b;
+                    }
+                    if (thisEqual) {
+                        b++;
+                    }
+                }
+            }
+        }
+
+        public void setTextSize(float textSizePx) {
+            final float lastTextPaint = textPaint.getTextSize();
+            textPaint.setTextSize(textSizePx);
+            if (Math.abs(lastTextPaint - textSizePx) > 0.5f) {
+                final int width = overrideFullWidth > 0 ? overrideFullWidth : bounds.width();
+                rebuildLayouts(width);
+                invalidateSelf();
+            }
+        }
+
+        public float getTextSize() {
+            return textPaint.getTextSize();
+        }
+
+        public void setTextColor(int color) {
+            textPaint.setColor(color);
+            alpha = Color.alpha(color);
+        }
+
+        private boolean shadowed = false;
+        private float shadowRadius, shadowDx, shadowDy;
+        private int shadowColor;
+        public void setShadowLayer(float radius, float dx, float dy, int shadowColor) {
+            shadowed = true;
+            textPaint.setShadowLayer(shadowRadius = radius, shadowDx = dx, shadowDy = dy, this.shadowColor = shadowColor);
+        }
+
+        public int getTextColor() {
+            return textPaint.getColor();
+        }
+
+        private ValueAnimator colorAnimator;
+        private int colorAnimationTarget;
+        public void setTextColor(int color, boolean animated) {
+            if (animated && colorAnimator != null && colorAnimationTarget == color) {
+                return;
+            }
+            if (colorAnimator != null) {
+                colorAnimator.removeAllListeners();
+                colorAnimator.removeAllUpdateListeners();
+                colorAnimator.cancel();
+                colorAnimator = null;
+            }
+            final int from = ColorUtils.setAlphaComponent(textPaint.getColor(), alpha);
+            if (!animated || from == color) {
+                setTextColor(color);
+                invalidateSelf();
+                updateAnimationVisibility();
+            } else {
+                final int to = color;
+                colorAnimationTarget = color;
+                colorAnimator = ValueAnimator.ofFloat(0, 1);
+                colorAnimator.addUpdateListener(anm -> {
+                    setTextColor(ColorUtils.blendARGB(from, to, (float) anm.getAnimatedValue()));
+                    invalidateSelf();
+                });
+                colorAnimator.addListener(new AnimatorListenerAdapter() {
+                    @Override
+                    public void onAnimationEnd(Animator animation) {
+                        if (colorAnimator != animation) {
+                            return;
+                        }
+                        colorAnimator = null;
+                        setTextColor(to);
+                        updateAnimationVisibility();
+                    }
+                });
+                colorAnimator.setDuration(240);
+                colorAnimator.setInterpolator(CubicBezierInterpolator.EASE_OUT_QUINT);
+                colorAnimator.start();
+                trackAnimation(colorAnimator);
+            }
+        }
+
+        private int emojiColor;
+        private ColorFilter emojiColorFilter;
+
+        public void setEmojiColorFilter(ColorFilter colorFilter) {
+            emojiColorFilter = colorFilter;
+        }
+
+        public void setEmojiColor(int emojiColor) {
+            if (this.emojiColor != emojiColor) {
+                emojiColorFilter = new PorterDuffColorFilter(this.emojiColor = emojiColor, PorterDuff.Mode.SRC_IN);
+            }
+        }
+
+        private ValueAnimator emojiColorAnimator;
+        private int emojiColorAnimationTarget;
+        public void setEmojiColor(int color, boolean animated) {
+            if (animated && emojiColorAnimator != null && emojiColorAnimationTarget == color) return;
+            if (emojiColorAnimator != null) {
+                emojiColorAnimator.removeAllListeners();
+                emojiColorAnimator.removeAllUpdateListeners();
+                emojiColorAnimator.cancel();
+                emojiColorAnimator = null;
+            }
+            if (!animated || emojiColor == color) {
+                setEmojiColor(color);
+                invalidateSelf();
+                updateAnimationVisibility();
+            } else if (emojiColor != color) {
+                final int from = emojiColor;
+                final int to = color;
+                emojiColorAnimationTarget = color;
+                emojiColorAnimator = ValueAnimator.ofFloat(0, 1);
+                emojiColorAnimator.addUpdateListener(anm -> {
+                    setEmojiColor(ColorUtils.blendARGB(from, to, (float) anm.getAnimatedValue()));
+                    invalidateSelf();
+                });
+                emojiColorAnimator.addListener(new AnimatorListenerAdapter() {
+                    @Override
+                    public void onAnimationEnd(Animator animation) {
+                        if (emojiColorAnimator != animation) return;
+                        emojiColorAnimator = null;
+                        setEmojiColor(to);
+                        invalidateSelf();
+                        updateAnimationVisibility();
+                    }
+                });
+                emojiColorAnimator.setDuration(240);
+                emojiColorAnimator.setInterpolator(CubicBezierInterpolator.EASE_OUT_QUINT);
+                emojiColorAnimator.start();
+                trackAnimation(emojiColorAnimator);
+            }
+        }
+
+        public void setTypeface(Typeface typeface) {
+            textPaint.setTypeface(typeface);
+        }
+
+        public void setGravity(int gravity) {
+            this.gravity = gravity;
+        }
+
+        public int getGravity() {
+            return this.gravity;
+        }
+
+        public void setAnimationProperties(float moveAmplitude, long startDelay, long duration, TimeInterpolator interpolator) {
+            setAnimationProperties(moveAmplitude, startDelay, duration, 1.0f, interpolator);
+        }
+
+        public void setAnimationProperties(float moveAmplitude, long startDelay, long duration, float wave, TimeInterpolator interpolator) {
+            this.moveAmplitude = moveAmplitude;
+            animateDelay = startDelay;
+            animateDuration = duration;
+            animateWave = wave;
+            animateInterpolator = interpolator;
+        }
+
+        public void setScaleProperty(float scale) {
+            this.scaleAmplitude = scale;
+        }
+
+        public void copyStylesFrom(TextPaint paint) {
+            setTextColor(paint.getColor());
+            setTextSize(paint.getTextSize());
+            ((SystemTextPaint) textPaint).copyTypefaceFrom(paint);
+        }
+
+        public TextPaint getPaint() {
+            return textPaint;
+        }
+
+        private interface RegionCallback {
+            void run(CharSequence part, int start, int end);
+        }
+
+        @Override
+        public void setAlpha(int alpha) {
+            this.alpha = alpha;
+        }
+
+        @Override
+        public void setColorFilter(@Nullable ColorFilter colorFilter) {
+            textPaint.setColorFilter(colorFilter);
+        }
+
+        @Deprecated @Override
+        public int getOpacity() {
+            return PixelFormat.TRANSPARENT;
+        }
+
+        @Override
+        public void setBounds(@NonNull Rect bounds) {
+            super.setBounds(bounds);
+            this.bounds.set(bounds);
+        }
+
+        public void setBounds(@NonNull RectF bounds) {
+            setBounds((int) bounds.left, (int) bounds.top, (int) bounds.right, (int) bounds.bottom);
+        }
+
+        @Override
+        public void setBounds(int left, int top, int right, int bottom) {
+            super.setBounds(left, top, right, bottom);
+            this.bounds.set(left, top, right, bottom);
+        }
+
+        public void setBounds(float left, float top, float right, float bottom) {
+            super.setBounds((int) left, (int) top, (int) right, (int) bottom);
+            this.bounds.set((int) left, (int) top, (int) right, (int) bottom);
+        }
+
+        @NonNull
+        @Override
+        public Rect getDirtyBounds() {
+            return this.bounds;
+        }
+
+        public float isNotEmpty() {
+            return lerp(
+                oldText == null || oldText.length() <= 0 ? 0f : 1f,
+                currentText == null || currentText.length() <= 0 ? 0f : 1f,
+                oldText == null ? 1f : t
+            );
+        }
+
+        private Runnable widthUpdatedListener;
+        public void setOnWidthUpdatedListener(Runnable listener) {
+            widthUpdatedListener = listener;
+        }
+
+        public void setIncludeFontPadding(boolean includeFontPadding) {
+            this.includeFontPadding = includeFontPadding;
+        }
+    }
+    @Override
+    protected void onAttachedToWindow() {
+        super.onAttachedToWindow();
+        drawable.setEmojiAttached(true);
+        drawable.updateAnimationVisibility();
+    }
+    @Override
+    protected void onDetachedFromWindow() {
+        drawable.setEmojiAttached(false);
+        super.onDetachedFromWindow();
+        drawable.updateAnimationVisibility();
+    }
+
+    @Override
+    protected void onVisibilityChanged(View changedView, int visibility) {
+        super.onVisibilityChanged(changedView, visibility);
+        if (drawable != null) drawable.updateAnimationVisibility();
+    }
+
+    @Override
+    protected void onWindowVisibilityChanged(int visibility) {
+        super.onWindowVisibilityChanged(visibility);
+        if (drawable != null) drawable.updateAnimationVisibility();
+    }
+
+    private boolean hideBackgroundIfEmpty;
+    private Drawable backgroundDrawable;
+    private final AnimatedTextDrawable drawable;
+    private int lastMaxWidth, maxWidth;
+
+    private CharSequence toSetText;
+    private boolean toSetMoveDown;
+    public boolean adaptWidth = true;
+
+    public AnimatedTextView(Context context) {
+        this(context, false, false, false);
+    }
+
+    public AnimatedTextView(Context context, boolean splitByWords, boolean preserveIndex, boolean startFromEnd) {
+        super(context);
+        drawable = new AnimatedTextDrawable(splitByWords, preserveIndex, startFromEnd);
+        drawable.setCallback(this);
+        drawable.setEmojiAttached(false);
+        drawable.setOnAnimationFinishListener(() -> {
+            if (adaptWidth) {
+                requestLayout();
+            }
+            if (toSetText != null) {
+                final CharSequence nextText = toSetText;
+                final boolean nextMoveDown = toSetMoveDown;
+                toSetText = null;
+                toSetMoveDown = false;
+                AnimatedTextView.this.setText(nextText, true, nextMoveDown);
+            }
+        });
+    }
+
+    public void setMaxWidth(int width) {
+        maxWidth = width;
+    }
+
+    @Override
+    protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
+        int width = MeasureSpec.getSize(widthMeasureSpec);
+        int height = MeasureSpec.getSize(heightMeasureSpec);
+        if (maxWidth > 0 && MeasureSpec.getMode(widthMeasureSpec) != MeasureSpec.EXACTLY) {
+            width = Math.min(width, maxWidth);
+        }
+        if (getLayoutParams().width != 0) {
+            drawable.setBounds(getPaddingLeft(), getPaddingTop(), width - getPaddingRight(), height - getPaddingBottom());
+            drawable.updateLayoutWidth();
+        }
+        lastMaxWidth = width;
+        if (adaptWidth && MeasureSpec.getMode(widthMeasureSpec) == MeasureSpec.AT_MOST) {
+            width = Math.min(width, getPaddingLeft() + (int) Math.ceil(drawable.getWidth()) + getPaddingRight());
+        }
+        setMeasuredDimension(width, height);
+    }
+
+    @Override
+    protected void onDraw(Canvas canvas) {
+        if (backgroundDrawable != null && (!hideBackgroundIfEmpty || drawable.isNotEmpty() > 0)) {
+            final int width = (int) (getPaddingLeft() + drawable.getCurrentWidth() + getPaddingRight());
+            if ((drawable.gravity & Gravity.HORIZONTAL_GRAVITY_MASK) == Gravity.RIGHT) {
+                backgroundDrawable.setBounds(getWidth() - width, 0, getWidth(), getHeight());
+            } else {
+                backgroundDrawable.setBounds(0, 0, width, getHeight());
+            }
+            backgroundDrawable.draw(canvas);
+        }
+        drawable.setBounds(getPaddingLeft(), getPaddingTop(), getMeasuredWidth() - getPaddingRight(), getMeasuredHeight() - getPaddingBottom());
+        drawable.draw(canvas);
+    }
+
+    public void setText(CharSequence text) {
+        setText(text, true, true);
+    }
+
+    public void setText(CharSequence text, boolean animated) {
+        setText(text, animated, true);
+    }
+
+    public void cancelAnimation() {
+        final CharSequence latest = toSetText;
+        final boolean moveDown = toSetMoveDown;
+        toSetText = null;
+        toSetMoveDown = false;
+        if (latest != null) {
+            drawable.setText(latest, false, moveDown);
+        } else {
+            drawable.cancelAnimation();
+        }
+        if (adaptWidth) {
+            requestLayout();
+        }
+    }
+
+    public boolean isAnimating() {
+        return drawable.isAnimating();
+    }
+
+    public void setAnimationPaused(boolean paused) {
+        drawable.setAnimationPaused(paused);
+    }
+    public void setIgnoreRTL(boolean value) {
+        drawable.ignoreRTL = value;
+    }
+
+    private boolean first = true;
+    public void setText(CharSequence text, boolean animated, boolean moveDown) {
+        animated = !first && animated && text != null;
+        first = false;
+        if (!drawable.canAnimate()) {
+            toSetText = null;
+            toSetMoveDown = false;
+        }
+        if (animated && drawable.canAnimate() && drawable.deferredWarmText == null && !drawable.allowCancel && drawable.isAnimating()) {
+            toSetText = TextUtils.equals(text, drawable.currentText) ? null : text;
+            toSetMoveDown = moveDown;
+            return;
+        }
+        toSetText = null;
+        toSetMoveDown = false;
+        int wasWidth = (int) drawable.getWidth();
+        drawable.setBounds(getPaddingLeft(), getPaddingTop(), lastMaxWidth - getPaddingRight(), getMeasuredHeight() - getPaddingBottom());
+        drawable.setText(text, animated, moveDown);
+        if (wasWidth < drawable.getWidth() || !animated && wasWidth != drawable.getWidth()) {
+            requestLayout();
+        }
+    }
+
+    public void setSizeableBackground(Drawable drawable) {
+        backgroundDrawable = drawable;
+        invalidate();
+    }
+
+    public void setHideBackgroundIfEmpty(boolean hideBackgroundIfEmpty) {
+        this.hideBackgroundIfEmpty = hideBackgroundIfEmpty;
+    }
+
+    public Drawable getSizeableBackground() {
+        return backgroundDrawable;
+    }
+
+    public int width() {
+        return getPaddingLeft() + (int) Math.ceil(drawable.getCurrentWidth()) + getPaddingRight();
+    }
+
+    public int finalWidth() {
+        return getPaddingLeft() + (int) Math.ceil(drawable.getAnimateToWidth()) + getPaddingRight();
+    }
+
+    public CharSequence getText() {
+        return toSetText != null ? toSetText : drawable.getText();
+    }
+
+    public int getTextHeight() {
+        return getPaint().getFontMetricsInt().descent - getPaint().getFontMetricsInt().ascent;
+    }
+
+    public void setTextSize(float textSizePx) {
+        drawable.setTextSize(textSizePx);
+    }
+
+    public void setTextColor(int color) {
+        drawable.setTextColor(color);
+        invalidate();
+    }
+
+    public void setTextColor(int color, boolean animated) {
+        drawable.setTextColor(color, animated);
+        invalidate();
+    }
+
+    public void setEmojiCacheType(int cacheType) {
+        drawable.setEmojiCacheType(cacheType);
+    }
+
+    public void setEmojiColor(int color) {
+        drawable.setEmojiColor(color);
+        invalidate();
+    }
+
+    public void setEmojiColor(int color, boolean animated) {
+        drawable.setEmojiColor(color, animated);
+        invalidate();
+    }
+    public void setEmojiColorFilter(ColorFilter emojiColorFilter) {
+        drawable.setEmojiColorFilter(emojiColorFilter);
+        invalidate();
+    }
+    public int getTextColor() {
+        return drawable.getTextColor();
+    }
+
+    public void setTypeface(Typeface typeface) {
+        drawable.setTypeface(typeface);
+    }
+
+    public void setGravity(int gravity) {
+        drawable.setGravity(gravity);
+    }
+
+    public void setAnimationProperties(float moveAmplitude, long startDelay, long duration, TimeInterpolator interpolator) {
+        drawable.setAnimationProperties(moveAmplitude, startDelay, duration, interpolator);
+    }
+
+    public void setScaleProperty(float scale) {
+        drawable.setScaleProperty(scale);
+    }
+
+    public AnimatedTextDrawable getDrawable() {
+        return drawable;
+    }
+
+    public TextPaint getPaint() {
+        return drawable.getPaint();
+    }
+
+    @Override
+    public void invalidateDrawable(@NonNull Drawable drawable) {
+        super.invalidateDrawable(drawable);
+        invalidate();
+    }
+
+    @Override
+    public void onInitializeAccessibilityNodeInfo(AccessibilityNodeInfo info) {
+        super.onInitializeAccessibilityNodeInfo(info);
+        info.setClassName("android.widget.TextView");
+        info.setText(getText());
+    }
+
+    public void setEllipsizeByGradient(boolean enabled) {
+        drawable.setEllipsizeByGradient(enabled);
+    }
+
+    public void setRightPadding(float rightPadding) {
+        drawable.setRightPadding(rightPadding);
+    }
+
+    public float getRightPadding() {
+        return drawable.getRightPadding();
+    }
+
+    private Runnable widthUpdatedListener;
+    public void setOnWidthUpdatedListener(Runnable listener) {
+        drawable.setOnWidthUpdatedListener(listener);
+    }
+
+    public void setIncludeFontPadding(boolean includeFontPadding) {
+        this.drawable.setIncludeFontPadding(includeFontPadding);
+    }
+
+    public void setAllowCancel(boolean allow) {
+        this.drawable.setAllowCancel(allow);
+    }
+}

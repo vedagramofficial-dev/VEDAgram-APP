@@ -1,0 +1,1830 @@
+/* Modifications Copyright (C) 2026 Ettacent */
+
+/*
+ * This is the source code of Telegram for Android v. 5.x.x.
+ * It is licensed under GNU GPL v. 2 or later.
+ * You should have received a copy of the license in this archive (see LICENSE).
+ *
+ * Copyright Nikolai Kudashov, 2013-2018.
+ */
+
+package org.telegram.ui.ActionBar;
+
+import app.nimarkogram.messenger.utils.NimarkoUiAnimationClock;
+import app.nimarkogram.messenger.utils.ui.SystemTextPaint;
+import static org.telegram.messenger.AndroidUtilities.dp;
+
+import android.content.Context;
+import android.graphics.Canvas;
+import android.graphics.ColorFilter;
+import android.graphics.LinearGradient;
+import android.graphics.Paint;
+import android.graphics.Path;
+import android.graphics.PorterDuff;
+import android.graphics.PorterDuffColorFilter;
+import android.graphics.PorterDuffXfermode;
+import android.graphics.Rect;
+import android.graphics.Region;
+import android.graphics.Shader;
+import android.graphics.Typeface;
+import android.graphics.drawable.Drawable;
+import android.os.Build;
+import android.os.Bundle;
+import android.text.Layout;
+import android.text.Spannable;
+import android.text.SpannableStringBuilder;
+import android.text.StaticLayout;
+import android.text.TextPaint;
+import android.text.TextUtils;
+import android.view.Gravity;
+import android.view.MotionEvent;
+import android.view.View;
+import android.view.accessibility.AccessibilityNodeInfo;
+
+import androidx.annotation.NonNull;
+
+import org.telegram.messenger.AndroidUtilities;
+import org.telegram.messenger.Emoji;
+import org.telegram.messenger.R;
+import org.telegram.ui.Cells.DialogCell;
+import org.telegram.ui.Components.AnimatedEmojiDrawable;
+import org.telegram.ui.Components.AnimatedEmojiSpan;
+import org.telegram.ui.Components.EmptyStubSpan;
+import org.telegram.ui.Components.StaticLayoutEx;
+import org.telegram.ui.Components.spoilers.SpoilerEffect;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Stack;
+
+public class SimpleTextView extends View implements Drawable.Callback {
+
+    private float layoutX, layoutY;
+    private Layout layout;
+    private Layout firstLineLayout;
+    private Layout fullLayout;
+    private Layout partLayout;
+    private TextPaint textPaint;
+    private TextPaint naturalLayoutPaint;
+    private boolean naturalLayout;
+    private int gravity = Gravity.LEFT | Gravity.TOP;
+    private int maxLines = 1;
+    private CharSequence text;
+    private String textContentSnapshot;
+    private SpannableStringBuilder spannableStringBuilder;
+    private Drawable leftDrawable;
+    private Drawable rightDrawable;
+    private Drawable rightDrawable2;
+    private CharSequence rightDrawableContentDescription;
+    private CharSequence rightDrawable2ContentDescription;
+    private Drawable replacedDrawable;
+    private String replacedText;
+    private int replacingDrawableTextIndex;
+    private float replacingDrawableTextOffset;
+    private float rightDrawableScale = 1.0f;
+    private int drawablePadding = dp(4);
+    private int outsideRightDrawableTextClipInset = dp(2);
+    private int leftDrawableTopPadding;
+    private int rightDrawableTopPadding;
+    private boolean buildFullLayout;
+    private float fullAlpha;
+    private boolean widthWrapContent;
+
+    private Drawable wrapBackgroundDrawable;
+
+    private boolean scrollNonFitText;
+    private boolean textDoesNotFit;
+    private float textOverflow;
+    private float scrollingOffset;
+    private float lastDrawnScrollingOffset;
+    private long lastUpdateTime;
+    private int currentScrollDelay;
+    private boolean marqueeResumePending;
+    private long marqueeResumeElapsedMs = MARQUEE_RESUME_DURATION_MS;
+    private Paint fadePaint;
+    private Paint fadePaintBack;
+    private Paint fadeEllpsizePaint;
+    private int fadeEllpsizePaintWidth;
+    private int lastWidth;
+
+    private int offsetX;
+    private int offsetY;
+    private int textWidth;
+    private int totalWidth;
+    private int textHeight;
+    public int rightDrawableX;
+    public int rightDrawableY;
+    private boolean wasLayout;
+
+    private boolean leftDrawableOutside, rightDrawableOutside;
+    private boolean rightDrawableInside;
+    private boolean ellipsizeByGradient, ellipsizeByGradientLeft;
+    private Boolean forceEllipsizeByGradientLeft;
+    private int ellipsizeByGradientWidthDp = 16;
+    private int paddingRight;
+
+    private int minWidth;
+
+    private static final int PIXELS_PER_SECOND = 50;
+    private static final int PIXELS_PER_SECOND_SLOW = 30;
+    private static final int DIST_BETWEEN_SCROLLING_TEXT = 16;
+    private static final int SCROLL_DELAY_MS = 500;
+    private static final int SCROLL_SLOWDOWN_PX = 100;
+    private static final int MARQUEE_RESUME_DURATION_MS = 180;
+    private int fullLayoutAdditionalWidth;
+    private int fullLayoutLeftOffset;
+    private float fullLayoutLeftCharactersOffset;
+
+    private int minusWidth;
+    private int fullTextMaxLines = 3;
+
+    private List<SpoilerEffect> spoilers = new ArrayList<>();
+    private Stack<SpoilerEffect> spoilersPool = new Stack<>();
+    private Path path = new Path();
+    private boolean usaAlphaForEmoji;
+    private boolean canHideRightDrawable;
+    private boolean rightDrawableHidden;
+    private int layoutRightDrawableWidth = -1;
+    private int layoutRightDrawable2Width = -1;
+    private OnClickListener rightDrawableOnClickListener;
+    private boolean maybeClick;
+    private float touchDownX, touchDownY;
+
+    private AnimatedEmojiSpan.EmojiGroupedSpans emojiStack;
+    private int emojiCacheType = AnimatedEmojiDrawable.CACHE_TYPE_MESSAGES;
+    private ColorFilter emojiStackColorFilter;
+    private boolean attachedToWindow;
+
+    private Layout.Alignment mAlignment = Layout.Alignment.ALIGN_NORMAL;
+
+    public void setEmojiColor(int color) {
+        emojiStackColorFilter = new PorterDuffColorFilter(color, PorterDuff.Mode.SRC_IN);
+    }
+
+    public SimpleTextView(Context context) {
+        super(context);
+        textPaint = new SystemTextPaint(Paint.ANTI_ALIAS_FLAG);
+        setImportantForAccessibility(IMPORTANT_FOR_ACCESSIBILITY_YES);
+    }
+
+    public void setTextColor(int color) {
+        textPaint.setColor(color);
+        invalidate();
+    }
+
+    public void setLinkTextColor(int color) {
+        textPaint.linkColor = color;
+        invalidate();
+    }
+
+    public Layout getLayout() {
+        return layout;
+    }
+
+    public float getLayoutX() {
+        return layoutX;
+    }
+
+    public float getLayoutY() {
+        return layoutY;
+    }
+
+    @Override
+    protected void onAttachedToWindow() {
+        super.onAttachedToWindow();
+        attachedToWindow = true;
+        lastUpdateTime = 0;
+        emojiStack = AnimatedEmojiSpan.update(emojiCacheType, this, emojiStack, layout);
+    }
+    @Override
+    protected void onWindowVisibilityChanged(int visibility) {
+        super.onWindowVisibilityChanged(visibility);
+        if (visibility == VISIBLE) {
+            lastUpdateTime = 0;
+            invalidate();
+        } else {
+            pauseScrollAnimation();
+        }
+    }
+
+    private void pauseScrollAnimation() {
+        if (scrollNonFitText && scrollingOffset > 0 && currentScrollDelay <= 0) {
+            marqueeResumePending = true;
+        }
+        lastUpdateTime = 0;
+    }
+
+    @Override
+    public void onWindowFocusChanged(boolean hasWindowFocus) {
+        super.onWindowFocusChanged(hasWindowFocus);
+        if (!hasWindowFocus) {
+            pauseScrollAnimation();
+        } else {
+            lastUpdateTime = 0;
+            invalidate();
+        }
+    }
+
+    @Override
+    protected void onVisibilityChanged(View changedView, int visibility) {
+        super.onVisibilityChanged(changedView, visibility);
+        if (!isScrollPresentationVisible()) pauseScrollAnimation();
+    }
+
+    private boolean isScrollPresentationVisible() {
+        if (NimarkoUiAnimationClock.isPaused() || !isAttachedToWindow() || !hasWindowFocus()
+                || getWindowVisibility() != VISIBLE || !isShown()) return false;
+        for (View view = this; view != null;
+                view = view.getParent() instanceof View ? (View) view.getParent() : null) {
+            if (view.getVisibility() != VISIBLE || view.getAlpha() <= 0f) return false;
+        }
+        return true;
+    }
+
+    public void setEmojiCacheType(int cacheType) {
+        if (cacheType != emojiCacheType) {
+            AnimatedEmojiSpan.release(this, emojiStack);
+            emojiCacheType = cacheType;
+            if (attachedToWindow) {
+                emojiStack = AnimatedEmojiSpan.update(emojiCacheType, this, emojiStack, layout);
+            }
+        }
+    }
+
+    @Override
+    protected void onDetachedFromWindow() {
+        super.onDetachedFromWindow();
+        attachedToWindow = false;
+        pauseScrollAnimation();
+        AnimatedEmojiSpan.release(this, emojiStack);
+        wasLayout = false;
+    }
+
+    public void setTextSize(int sizeInDp) {
+        setTextSizePx(dp(sizeInDp));
+    }
+
+    public void setTextSizePx(int newSize) {
+        if (newSize == textPaint.getTextSize()) {
+            return;
+        }
+        textPaint.setTextSize(newSize);
+        if (!recreateLayoutMaybe()) {
+            invalidate();
+        }
+    }
+
+    public void setBuildFullLayout(boolean value) {
+        buildFullLayout = value;
+    }
+
+    public void setFullAlpha(float value) {
+        fullAlpha = value;
+        invalidate();
+    }
+
+    public float getFullAlpha() {
+        return fullAlpha;
+    }
+
+    public void setScrollNonFitText(boolean value) {
+        if (scrollNonFitText == value) {
+            return;
+        }
+        scrollNonFitText = value;
+        updateFadePaints();
+        requestLayout();
+        checkUi_layerType();
+    }
+
+    public void setEllipsizeByGradient(boolean value) {
+        setEllipsizeByGradient(value, null);
+    }
+
+    public void setEllipsizeByGradient(int value) {
+        setEllipsizeByGradient(value, null);
+    }
+
+    public void setEllipsizeByGradient(boolean value, Boolean forceLeft) {
+        if (ellipsizeByGradient == value
+                && (forceEllipsizeByGradientLeft == null ? forceLeft == null : forceEllipsizeByGradientLeft.equals(forceLeft))) {
+            return;
+        }
+        ellipsizeByGradient = value;
+        this.forceEllipsizeByGradientLeft = forceLeft;
+        updateFadePaints();
+        requestLayout();
+        invalidate();
+        checkUi_layerType();
+    }
+
+    public void setEllipsizeByGradient(int value, Boolean forceLeft) {
+        setEllipsizeByGradient(true, forceLeft);
+        ellipsizeByGradientWidthDp = value;
+        updateFadePaints();
+    }
+
+    public void setWidthWrapContent(boolean value) {
+        if (widthWrapContent == value) {
+            return;
+        }
+        widthWrapContent = value;
+        requestLayout();
+    }
+
+    private void updateFadePaints() {
+        if ((fadePaint == null || fadePaintBack == null) && scrollNonFitText) {
+            fadePaint = new Paint();
+            fadePaint.setShader(new LinearGradient(0, 0, dp(6), 0, new int[]{0xffffffff, 0}, new float[]{0f, 1f}, Shader.TileMode.CLAMP));
+            fadePaint.setXfermode(new PorterDuffXfermode(PorterDuff.Mode.DST_OUT));
+
+            fadePaintBack = new Paint();
+            fadePaintBack.setShader(new LinearGradient(0, 0, dp(6), 0, new int[]{0, 0xffffffff}, new float[]{0f, 1f}, Shader.TileMode.CLAMP));
+            fadePaintBack.setXfermode(new PorterDuffXfermode(PorterDuff.Mode.DST_OUT));
+        }
+        boolean ellipsizeLeft;
+        if (forceEllipsizeByGradientLeft != null) {
+            ellipsizeLeft = forceEllipsizeByGradientLeft;
+        } else {
+            ellipsizeLeft = false;
+//            ellipsizeLeft = getAlignment() == Layout.Alignment.ALIGN_NORMAL && LocaleController.isRTL || getAlignment() == Layout.Alignment.ALIGN_OPPOSITE && !LocaleController.isRTL;
+        }
+        if ((fadeEllpsizePaint == null || fadeEllpsizePaintWidth != dp(ellipsizeByGradientWidthDp) || ellipsizeByGradientLeft != ellipsizeLeft) && ellipsizeByGradient) {
+            if (fadeEllpsizePaint == null) {
+                fadeEllpsizePaint = new Paint();
+            }
+            ellipsizeByGradientLeft = ellipsizeLeft;
+            if (ellipsizeByGradientLeft) {
+                fadeEllpsizePaint.setShader(new LinearGradient(0, 0, fadeEllpsizePaintWidth = dp(ellipsizeByGradientWidthDp), 0, new int[]{0xffffffff, 0}, new float[]{0f, 1f}, Shader.TileMode.CLAMP));
+            } else {
+                fadeEllpsizePaint.setShader(new LinearGradient(0, 0, fadeEllpsizePaintWidth = dp(ellipsizeByGradientWidthDp), 0, new int[]{0, 0xffffffff}, new float[]{0f, 1f}, Shader.TileMode.CLAMP));
+            }
+            fadeEllpsizePaint.setXfermode(new PorterDuffXfermode(PorterDuff.Mode.DST_OUT));
+        }
+    }
+
+    public void setMaxLines(int value) {
+        maxLines = value;
+    }
+
+    public void setGravity(int value) {
+        gravity = value;
+    }
+
+    public void setTypeface(Typeface typeface) {
+        textPaint.setTypeface(typeface);
+    }
+
+    public int getSideDrawablesSize() {
+        int size = 0;
+        if (leftDrawable != null) {
+            size += leftDrawable.getIntrinsicWidth() + drawablePadding;
+        }
+        if (!rightDrawableHidden && isRightDrawableVisible(rightDrawable)) {
+            size += getRightDrawableSlotWidth(rightDrawable);
+        }
+        if (!rightDrawableHidden && isRightDrawableVisible(rightDrawable2)) {
+            size += getRightDrawableSlotWidth(rightDrawable2);
+        }
+        return size;
+    }
+
+    private boolean isRightDrawableVisible(Drawable drawable) {
+        if (drawable == null || rightDrawableScale <= 0f) {
+            return false;
+        }
+        return !(drawable instanceof AnimatedEmojiDrawable.SwapAnimatedEmojiDrawable)
+                || ((AnimatedEmojiDrawable.SwapAnimatedEmojiDrawable) drawable).hasRenderableContent();
+    }
+    private boolean isRightDrawableInteractive(Drawable drawable) {
+        return !rightDrawableHidden && drawable != null && rightDrawableScale > 0f
+                && (!(drawable instanceof AnimatedEmojiDrawable.SwapAnimatedEmojiDrawable)
+                || !((AnimatedEmojiDrawable.SwapAnimatedEmojiDrawable) drawable).isEmpty());
+    }
+
+    private int getScaledRightDrawableWidth(Drawable drawable) {
+        return isRightDrawableVisible(drawable)
+                ? (int) (drawable.getIntrinsicWidth() * rightDrawableScale) : 0;
+    }
+
+    private int getRightDrawableSlotWidth(Drawable drawable) {
+        int width = getScaledRightDrawableWidth(drawable);
+        return width > 0 ? width + drawablePadding : 0;
+    }
+    private void updateRightDrawableLayoutIfNeeded() {
+        int width = getRightDrawableSlotWidth(rightDrawable);
+        int width2 = getRightDrawableSlotWidth(rightDrawable2);
+        if (width == layoutRightDrawableWidth && width2 == layoutRightDrawable2Width) {
+            return;
+        }
+        layoutRightDrawableWidth = width;
+        layoutRightDrawable2Width = width2;
+        requestLayout();
+        invalidate();
+    }
+
+    public int getRightDrawablesWidth() {
+        if (rightDrawableHidden) {
+            return 0;
+        }
+        return getRightDrawableSlotWidth(rightDrawable) + getRightDrawableSlotWidth(rightDrawable2);
+    }
+
+    private int getOutsideRightDrawablesWidth() {
+        return rightDrawableOutside
+                ? getRightDrawableSlotWidth(rightDrawable) + getRightDrawableSlotWidth(rightDrawable2) : 0;
+    }
+
+    private int getOutsideRightDrawableTextClipInset() {
+        return rightDrawableOutside
+                && isRightDrawableVisible(rightDrawable)
+                && !(rightDrawable instanceof AnimatedEmojiDrawable.SwapAnimatedEmojiDrawable)
+                ? outsideRightDrawableTextClipInset : 0;
+    }
+
+    /**
+     * Returns the start of the complete outside trailing-drawable block.
+     *
+     * The old implementation clamped each drawable's left edge separately.
+     * That does not constrain the drawable's right edge and lets the second
+     * badge extend beyond the measured title.  Treating both badges as one
+     * measured block keeps their spacing stable and makes the last pixel obey
+     * the view's trailing content edge.  A fitting title keeps the block next
+     * to the text; a marquee pins it to the reserved trailing slot.
+     */
+    protected int getDrawableContentWidth() {
+        return getMeasuredWidth();
+    }
+    private int getOutsideRightDrawablesStartX(int textOffsetX) {
+        final int slotsWidth = getOutsideRightDrawablesWidth();
+        final int contentRight = Math.max(0, getDrawableContentWidth() - paddingRight);
+        final int maxStart = Math.max(0, contentRight - slotsWidth);
+        if (textDoesNotFit || scrollingOffset != 0) {
+            return maxStart;
+        }
+        final int naturalStart = offsetX + textOffsetX + textWidth;
+        return Math.max(0, Math.min(naturalStart, maxStart));
+    }
+
+    public TextPaint getPaint() {
+        return textPaint;
+    }
+
+    private void calcOffset(int width) {
+        if (layout == null) {
+            return;
+        }
+        if (layout.getLineCount() > 0) {
+            textWidth = (int) Math.max(Math.ceil(layout.getLineWidth(0)), Math.ceil(layout.getLineRight(0) - layout.getLineLeft(0)));
+            if (fullLayout != null) {
+                textHeight = fullLayout.getLineBottom(fullLayout.getLineCount() - 1);
+            } else if (maxLines > 1 && layout.getLineCount() > 0) {
+                textHeight = layout.getLineBottom(layout.getLineCount() - 1);
+            } else {
+                textHeight = layout.getLineBottom(0);
+            }
+
+            int rightDrawableWidth = rightDrawableInside && !rightDrawableOutside
+                    ? getRightDrawablesWidth() : 0;
+            if ((gravity & Gravity.HORIZONTAL_GRAVITY_MASK) == Gravity.CENTER_HORIZONTAL) {
+                offsetX = (width - textWidth - rightDrawableWidth) / 2 - (int) layout.getLineLeft(0);
+                if (scrollNonFitText && textWidth + rightDrawableWidth > width - paddingRight) {
+                    offsetX = -(int) layout.getLineLeft(0);
+                } else if (ellipsizeByGradient && !scrollNonFitText && textWidth + rightDrawableWidth > width) {
+                    offsetX = (ellipsizeByGradientLeft ? width - textWidth - rightDrawableWidth : 0)
+                            - (int) layout.getLineLeft(0);
+                }
+            } else if ((gravity & Gravity.HORIZONTAL_GRAVITY_MASK) == Gravity.LEFT) {
+                if (firstLineLayout != null) {
+                    offsetX = -(int) firstLineLayout.getLineLeft(0);
+                } else {
+                    offsetX = -(int) layout.getLineLeft(0);
+                }
+            } else if (layout.getLineLeft(0) == 0) {
+                if (firstLineLayout != null) {
+                    offsetX = (int) (width - firstLineLayout.getLineWidth(0) - rightDrawableWidth);
+                } else {
+                    offsetX = width - textWidth - rightDrawableWidth;
+                }
+            } else {
+                offsetX = -dp(8);
+            }
+            offsetX += getPaddingLeft();
+            textDoesNotFit = textWidth + rightDrawableWidth > (width - paddingRight);
+            textOverflow = Math.max(0f, layout.getLineWidth(0) + rightDrawableWidth - (width - paddingRight));
+            checkUi_layerType();
+
+            if (fullLayout != null && fullLayoutAdditionalWidth > 0) {
+                fullLayoutLeftCharactersOffset = fullLayout.getPrimaryHorizontal(0) - firstLineLayout.getPrimaryHorizontal(0);
+            }
+        }
+
+        if (replacingDrawableTextIndex >= 0) {
+            replacingDrawableTextOffset = layout.getPrimaryHorizontal(replacingDrawableTextIndex);
+        } else {
+            replacingDrawableTextOffset = 0;
+        }
+    }
+
+    protected boolean createLayout(int width) {
+        final boolean wasNaturalLayout = naturalLayout;
+        naturalLayout = false;
+        layoutRightDrawableWidth = getRightDrawableSlotWidth(rightDrawable);
+        layoutRightDrawable2Width = getRightDrawableSlotWidth(rightDrawable2);
+        CharSequence text = this.text;
+        replacingDrawableTextIndex = -1;
+        rightDrawableHidden = false;
+        if (text != null) {
+            try {
+                int leftDrawableWidth = 0;
+                if (leftDrawable != null && !leftDrawableOutside) {
+                    leftDrawableWidth += leftDrawable.getIntrinsicWidth() + drawablePadding;
+                    width -= leftDrawable.getIntrinsicWidth();
+                    width -= drawablePadding;
+                }
+                int rightDrawableWidth = 0;
+                if (!rightDrawableInside) {
+                    if (isRightDrawableVisible(rightDrawable) && !rightDrawableOutside) {
+                        int slotWidth = getRightDrawableSlotWidth(rightDrawable);
+                        rightDrawableWidth += slotWidth;
+                        width -= slotWidth;
+                    }
+                    if (isRightDrawableVisible(rightDrawable2) && !rightDrawableOutside) {
+                        int slotWidth = getRightDrawableSlotWidth(rightDrawable2);
+                        rightDrawableWidth += slotWidth;
+                        width -= slotWidth;
+                    }
+                }
+                if (replacedText != null && replacedDrawable != null) {
+                    replacingDrawableTextIndex = text.toString().indexOf(replacedText);
+                    if (replacingDrawableTextIndex >= 0) {
+                        SpannableStringBuilder builder = SpannableStringBuilder.valueOf(text);
+                        builder.setSpan(new DialogCell.FixedWidthSpan(replacedDrawable.getIntrinsicWidth()), replacingDrawableTextIndex, replacingDrawableTextIndex + replacedText.length(), 0);
+                        text = builder;
+                    } else {
+                        width -= replacedDrawable.getIntrinsicWidth();
+                        width -= drawablePadding;
+                    }
+                }
+                if (canHideRightDrawable && rightDrawableWidth != 0 && !rightDrawableOutside) {
+                    CharSequence string = TextUtils.ellipsize(text, textPaint, width, TextUtils.TruncateAt.END);
+                    if (!sameTextCharacters(text, string)) {
+                        rightDrawableHidden = true;
+                        width += rightDrawableWidth;
+                    }
+                }
+                if (buildFullLayout) {
+                    CharSequence string = text;
+                    if (!ellipsizeByGradient) {
+                        string = TextUtils.ellipsize(string, textPaint, width, TextUtils.TruncateAt.END);
+                    }
+                    if (!ellipsizeByGradient && !sameTextCharacters(string, text)) {
+                        fullLayout = StaticLayoutEx.createStaticLayout(text, textPaint, width, getAlignment(), 1.0f, 0.0f, false, TextUtils.TruncateAt.END, width, fullTextMaxLines, false);
+                        if (fullLayout != null) {
+                            int end = fullLayout.getLineEnd(0);
+                            int start = fullLayout.getLineStart(1);
+                            CharSequence substr = text.subSequence(0, end);
+                            SpannableStringBuilder full = SpannableStringBuilder.valueOf(text);
+                            full.setSpan(new EmptyStubSpan(), 0, start, 0);
+                            CharSequence part;
+                            if (end < string.length()) {
+                                part = string.subSequence(end, string.length());
+                            } else {
+                                part = "…";
+                            }
+                            firstLineLayout = new StaticLayout(string, 0, string.length(), textPaint, scrollNonFitText ? dp(2000) : width + dp(8), getAlignment(), 1.0f, 0.0f, false);
+                            layout = new StaticLayout(substr, 0, substr.length(), textPaint, scrollNonFitText ? dp(2000) : width + dp(8), getAlignment(), 1.0f, 0.0f, false);
+                            if (layout.getLineLeft(0) != 0) {
+                                part = "\u200F" + part;
+                            }
+                            partLayout = new StaticLayout(part, 0, part.length(), textPaint, scrollNonFitText ? dp(2000) : width + dp(8), getAlignment(), 1.0f, 0.0f, false);
+                            fullLayout = StaticLayoutEx.createStaticLayout(full, textPaint, width + dp(8) + fullLayoutAdditionalWidth, getAlignment(), 1.0f, 0.0f, false, TextUtils.TruncateAt.END, width + fullLayoutAdditionalWidth, fullTextMaxLines, false);
+                        }
+                    } else {
+                        layout = new StaticLayout(string, 0, string.length(), textPaint, scrollNonFitText || ellipsizeByGradient ? dp(2000) : width + dp(8), getAlignment(), 1.0f, 0.0f, false);
+                        fullLayout = null;
+                        partLayout = null;
+                        firstLineLayout = null;
+                    }
+                } else if (maxLines > 1) {
+                    layout = StaticLayoutEx.createStaticLayout(text, textPaint, width, getAlignment(), 1.0f, 0.0f, false, TextUtils.TruncateAt.END, width, maxLines, false);
+                } else {
+                    CharSequence string;
+                    if (scrollNonFitText || ellipsizeByGradient) {
+                        string = text;
+                    } else {
+                        string = TextUtils.ellipsize(text, textPaint, width, TextUtils.TruncateAt.END);
+                    }
+                    final boolean cacheNaturalLayout = Build.VERSION.SDK_INT >= 28
+                            && (scrollNonFitText || ellipsizeByGradient) && string instanceof String;
+                    if (cacheNaturalLayout && wasNaturalLayout && layout != null
+                            && layout.getText() == string && layout.getWidth() == dp(2000)
+                            && layout.getAlignment() == getAlignment()
+                            && naturalLayoutPaint != null
+                            && textPaint.equalsForTextMeasurement(naturalLayoutPaint)) {
+                        naturalLayout = true;
+                        calcOffset(width);
+                        invalidate();
+                        return false;
+                    }
+                    /*if (layout != null && TextUtils.equals(layout.getText(), string)) {
+                        calcOffset(width);
+                        return false;
+                    }*/
+                    layout = new StaticLayout(string, 0, string.length(), textPaint, scrollNonFitText || ellipsizeByGradient ? dp(2000) : width + dp(8), getAlignment(), 1.0f, 0.0f, false);
+                    if (cacheNaturalLayout) {
+                        if (naturalLayoutPaint == null) {
+                            naturalLayoutPaint = new SystemTextPaint(0);
+                        }
+                        naturalLayoutPaint.set(textPaint);
+                        naturalLayout = true;
+                    }
+                }
+
+                spoilersPool.addAll(spoilers);
+                spoilers.clear();
+                if (layout != null && layout.getText() instanceof Spannable) {
+                    SpoilerEffect.addSpoilers(this, layout, -2, -2, spoilersPool, spoilers);
+                }
+                calcOffset(width);
+            } catch (Exception ignore) {
+
+            }
+        } else {
+            layout = null;
+            textWidth = 0;
+            textHeight = 0;
+        }
+        AnimatedEmojiSpan.release(this, emojiStack);
+        if (attachedToWindow) {
+            emojiStack = AnimatedEmojiSpan.update(emojiCacheType, this, emojiStack, layout);
+        }
+        invalidate();
+        return true;
+    }
+
+    public void setAlignment(Layout.Alignment alignment) {
+        mAlignment = alignment;
+        requestLayout();
+    }
+
+    private Layout.Alignment getAlignment() {
+        return mAlignment;
+    }
+
+    @Override
+    protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
+        int width = MeasureSpec.getSize(widthMeasureSpec);
+        int height = MeasureSpec.getSize(heightMeasureSpec);
+        if (AndroidUtilities.displaySize.x > 0 && lastWidth != AndroidUtilities.displaySize.x) {
+            lastWidth = AndroidUtilities.displaySize.x;
+            scrollingOffset = 0;
+            lastDrawnScrollingOffset = 0f;
+            currentScrollDelay = SCROLL_DELAY_MS;
+            marqueeResumePending = false;
+            marqueeResumeElapsedMs = MARQUEE_RESUME_DURATION_MS;
+            checkUi_layerType();
+        }
+        createLayout(width - getPaddingLeft() - getPaddingRight() - minusWidth
+                - (leftDrawableOutside && leftDrawable != null ? leftDrawable.getIntrinsicWidth() + drawablePadding : 0)
+                - getOutsideRightDrawablesWidth());
+
+        int finalHeight;
+        if (MeasureSpec.getMode(heightMeasureSpec) == MeasureSpec.EXACTLY) {
+            finalHeight = height;
+        } else {
+            finalHeight = getPaddingTop() + textHeight + getPaddingBottom();
+        }
+        if (widthWrapContent) {
+//            textWidth = (int) Math.ceil(layout.getLineWidth(0));
+            width = Math.min(width, getPaddingLeft() + textWidth + getPaddingRight() + minusWidth
+                    + (leftDrawableOutside && leftDrawable != null ? leftDrawable.getIntrinsicWidth() + drawablePadding : 0)
+                    + getOutsideRightDrawablesWidth());
+            width = Math.max(width, 0);
+        }
+        setMeasuredDimension(width, finalHeight);
+
+        if ((gravity & Gravity.VERTICAL_GRAVITY_MASK) == Gravity.CENTER_VERTICAL) {
+            offsetY = getPaddingTop() + (getMeasuredHeight() - getPaddingTop() - getPaddingBottom() - textHeight) / 2;
+        } else {
+            offsetY = getPaddingTop();
+        }
+    }
+
+    @Override
+    protected void onLayout(boolean changed, int left, int top, int right, int bottom) {
+        wasLayout = true;
+    }
+
+    public int getTextWidth() {
+        return textWidth + (rightDrawableInside && !rightDrawableOutside ? getRightDrawablesWidth() : 0);
+    }
+
+    public int getRightDrawableWidth() {
+        return getRightDrawableSlotWidth(rightDrawable);
+    }
+
+    public int getTextHeight() {
+        return textHeight;
+    }
+
+    public void setLeftDrawableTopPadding(int value) {
+        leftDrawableTopPadding = value;
+    }
+
+    public void setRightDrawableTopPadding(int value) {
+        rightDrawableTopPadding = value;
+    }
+
+    public void setLeftDrawable(int resId) {
+        setLeftDrawable(resId == 0 ? null : getContext().getResources().getDrawable(resId));
+    }
+
+    public Drawable getLeftDrawable() {
+        return leftDrawable;
+    }
+
+    public void setRightDrawable(int resId) {
+        setRightDrawable(resId == 0 ? null : getContext().getResources().getDrawable(resId));
+    }
+
+    public void setMinWidth(int width) {
+        minWidth = width;
+    }
+
+    @Override
+    public void setBackgroundDrawable(Drawable background) {
+        if (maxLines > 1) {
+            super.setBackgroundDrawable(background);
+            return;
+        }
+        wrapBackgroundDrawable = background;
+    }
+
+    @Override
+    public Drawable getBackground() {
+        if (wrapBackgroundDrawable != null) {
+            return wrapBackgroundDrawable;
+        }
+        return super.getBackground();
+    }
+
+    public void setLeftDrawable(Drawable drawable) {
+        if (leftDrawable == drawable) {
+            return;
+        }
+        if (leftDrawable != null) {
+            leftDrawable.setCallback(null);
+        }
+        leftDrawable = drawable;
+        if (drawable != null) {
+            drawable.setCallback(this);
+        }
+        if (!recreateLayoutMaybe()) {
+            invalidate();
+        }
+    }
+
+    @Override
+    protected boolean verifyDrawable(@NonNull Drawable who) {
+        return who == rightDrawable || who == rightDrawable2 || who == leftDrawable || super.verifyDrawable(who);
+    }
+
+    public void replaceTextWithDrawable(Drawable drawable, String replacedText) {
+        if (replacedDrawable == drawable && TextUtils.equals(this.replacedText, replacedText)) {
+            return;
+        }
+        if (replacedDrawable != null) {
+            replacedDrawable.setCallback(null);
+        }
+        replacedDrawable = drawable;
+        this.replacedText = replacedText;
+        if (drawable != null) {
+            drawable.setCallback(this);
+        }
+        if (!recreateLayoutMaybe()) {
+            invalidate();
+        }
+    }
+
+    public void setMinusWidth(int value) {
+        if (value == minusWidth) {
+            return;
+        }
+        minusWidth = value;
+        if (!recreateLayoutMaybe()) {
+            invalidate();
+        }
+    }
+
+    public Drawable getRightDrawable() {
+        return rightDrawable;
+    }
+
+    public boolean setRightDrawable(Drawable drawable) {
+        if (rightDrawable == drawable) {
+            return false;
+        }
+        if (rightDrawable != null) {
+            rightDrawable.setCallback(null);
+        }
+        rightDrawable = drawable;
+        if (drawable != null) {
+            drawable.setCallback(this);
+        }
+        if (!recreateLayoutMaybe()) {
+            invalidate();
+        }
+        return true;
+    }
+
+    public boolean setRightDrawable2(Drawable drawable) {
+        if (rightDrawable2 == drawable) {
+            return false;
+        }
+        if (rightDrawable2 != null) {
+            rightDrawable2.setCallback(null);
+        }
+        rightDrawable2 = drawable;
+        if (drawable != null) {
+            drawable.setCallback(this);
+        }
+        if (!recreateLayoutMaybe()) {
+            invalidate();
+        }
+        return true;
+    }
+
+    public Drawable getRightDrawable2() {
+        return rightDrawable2;
+    }
+
+    public void setRightDrawableScale(float scale) {
+        if (rightDrawableScale == scale) {
+            return;
+        }
+        rightDrawableScale = scale;
+        recreateLayoutMaybe();
+    }
+
+    public void setSideDrawablesColor(int color) {
+        Theme.setDrawableColor(rightDrawable, color);
+        Theme.setDrawableColor(leftDrawable, color);
+    }
+
+    public boolean setText(CharSequence value) {
+        return setText(value, false);
+    }
+
+    public boolean setText(CharSequence value, boolean force) {
+        if (text == null && value == null || !force && text instanceof String
+                && value instanceof String && (text == value || ((String) text).equals((String) value))) {
+            return false;
+        }
+        final boolean sameTextContent = text != null && value != null
+                && sameTextCharacters(textContentSnapshot, value);
+        if (!sameTextContent) {
+            textContentSnapshot = snapshotTextCharacters(value);
+        }
+        text = value;
+        naturalLayout = false;
+        // A marquee draws a second copy while scrollingOffset is non-zero.
+        // Keeping the old offset when the text changes makes the replacement
+        // title appear twice until that obsolete marquee cycle completes.
+        // Every new value must start a fresh cycle from its natural position.
+        if (!sameTextContent) {
+            scrollingOffset = 0;
+            currentScrollDelay = SCROLL_DELAY_MS;
+            marqueeResumePending = false;
+            marqueeResumeElapsedMs = MARQUEE_RESUME_DURATION_MS;
+            lastDrawnScrollingOffset = 0f;
+        }
+        if (lastUpdateTime != 0) {
+            lastUpdateTime = NimarkoUiAnimationClock.now();
+        }
+        recreateLayoutMaybe();
+        checkUi_layerType();
+        return true;
+    }
+
+    private static boolean sameTextCharacters(CharSequence first, CharSequence second) {
+        if (first == second) return true;
+        if (first == null || second == null) return false;
+        int length = first.length();
+        if (length != second.length()) return false;
+        if (first instanceof String && second instanceof String) {
+            return ((String) first).equals((String) second);
+        }
+        for (int i = 0; i < length; i++) {
+            if (first.charAt(i) != second.charAt(i)) return false;
+        }
+        return true;
+    }
+
+    private static String snapshotTextCharacters(CharSequence value) {
+        if (value == null) return null;
+        if (value instanceof String) return (String) value;
+        int length = value.length();
+        char[] characters = new char[length];
+        for (int i = 0; i < length; i++) characters[i] = value.charAt(i);
+        return new String(characters);
+    }
+    public void resetScrolling() {
+        scrollingOffset = 0;
+        lastDrawnScrollingOffset = 0f;
+        currentScrollDelay = SCROLL_DELAY_MS;
+        marqueeResumePending = false;
+        marqueeResumeElapsedMs = MARQUEE_RESUME_DURATION_MS;
+        lastUpdateTime = 0;
+        checkUi_layerType();
+        invalidate();
+    }
+
+    public void copyScrolling(SimpleTextView textView) {
+        scrollingOffset = textView.scrollingOffset;
+        lastDrawnScrollingOffset = textView.lastDrawnScrollingOffset;
+        currentScrollDelay = textView.currentScrollDelay;
+        lastUpdateTime = textView.lastUpdateTime;
+        marqueeResumePending = textView.marqueeResumePending;
+        marqueeResumeElapsedMs = textView.marqueeResumeElapsedMs;
+        checkUi_layerType();
+    }
+
+    public static final class ScrollingState {
+        private final String content;
+        private final float offset;
+        private final int delay;
+        private final int displayWidth;
+        private ScrollingState(SimpleTextView view) {
+            content = snapshotTextCharacters(view.text);
+            offset = view.scrollingOffset;
+            delay = view.currentScrollDelay;
+            displayWidth = view.lastWidth;
+        }
+    }
+
+    public ScrollingState captureScrollingState() { return new ScrollingState(this); }
+
+    public boolean restoreScrollingState(ScrollingState state) {
+        if (state == null || state.content == null || !sameTextCharacters(state.content, text)) return false;
+        scrollingOffset = lastDrawnScrollingOffset = state.offset;
+        currentScrollDelay = state.delay;
+        lastWidth = state.displayWidth;
+        lastUpdateTime = 0L;
+        marqueeResumePending = scrollingOffset > 0f && currentScrollDelay <= 0;
+        marqueeResumeElapsedMs = marqueeResumePending ? 0L : MARQUEE_RESUME_DURATION_MS;
+        checkUi_layerType();
+        invalidate();
+        return true;
+    }
+
+    public float getScrollingOffset() {
+        return scrollingOffset;
+    }
+
+    public float getLastDrawnScrollingOffset() {
+        return lastDrawnScrollingOffset;
+    }
+
+    public void setDrawablePadding(int value) {
+        if (drawablePadding == value) {
+            return;
+        }
+        drawablePadding = value;
+        if (!recreateLayoutMaybe()) {
+            invalidate();
+        }
+    }
+
+    private boolean recreateLayoutMaybe() {
+        // A wrap-content SimpleTextView derives its measured width from the
+        // current text and side drawables. Rebuilding only the StaticLayout
+        // leaves getMeasuredWidth() stale when either of them changes (most
+        // visible in ActionBar while a connection overlay removes/restores the
+        // premium emoji). Let the parent run a fresh measure/layout pass so the
+        // complete text+badge unit remains centred with its real width.
+        if (widthWrapContent) {
+            requestLayout();
+            invalidate();
+            return true;
+        }
+        if (wasLayout && getMeasuredHeight() != 0 && !buildFullLayout) {
+            boolean result = createLayout(getMaxTextWidth() - getPaddingLeft() - getPaddingRight() - minusWidth
+                    - (leftDrawableOutside && leftDrawable != null ? leftDrawable.getIntrinsicWidth() + drawablePadding : 0));
+            if ((gravity & Gravity.VERTICAL_GRAVITY_MASK) == Gravity.CENTER_VERTICAL) {
+                offsetY = (getMeasuredHeight() - textHeight) / 2;
+            } else {
+                offsetY = getPaddingTop();
+            }
+            return result;
+        } else {
+            requestLayout();
+        }
+        return true;
+    }
+
+    public CharSequence getText() {
+        if (text == null) {
+            return "";
+        }
+        return text;
+    }
+
+    public int getLineCount() {
+        int count = 0;
+        if (layout != null) {
+            count += layout.getLineCount();
+        }
+        if (fullLayout != null) {
+            count += fullLayout.getLineCount();
+        }
+        return count;
+    }
+
+    public int getTextStartX() {
+        if (layout == null) {
+            return 0;
+        }
+        int textOffsetX = 0;
+        if (leftDrawable != null) {
+            if ((gravity & Gravity.HORIZONTAL_GRAVITY_MASK) == Gravity.LEFT) {
+                textOffsetX += drawablePadding + leftDrawable.getIntrinsicWidth();
+            }
+        }
+        if (replacedDrawable != null && replacingDrawableTextIndex < 0) {
+            if ((gravity & Gravity.HORIZONTAL_GRAVITY_MASK) == Gravity.LEFT) {
+                textOffsetX += drawablePadding + replacedDrawable.getIntrinsicWidth();
+            }
+        }
+        return (int) getX() + offsetX + textOffsetX;
+    }
+
+    public TextPaint getTextPaint() {
+        return textPaint;
+    }
+
+    public int getTextStartY() {
+        if (layout == null) {
+            return 0;
+        }
+        return (int) getY();
+    }
+
+    public void setRightPadding(int padding) {
+        if (paddingRight != padding) {
+            paddingRight = padding;
+
+            int width = getMaxTextWidth() - getPaddingLeft() - getPaddingRight() - minusWidth;
+            if (leftDrawable != null && !leftDrawableOutside) {
+                width -= leftDrawable.getIntrinsicWidth();
+                width -= drawablePadding;
+            }
+            int rightDrawableWidth = 0;
+            if (!rightDrawableInside) {
+                if (isRightDrawableVisible(rightDrawable) && !rightDrawableOutside) {
+                    int slotWidth = getRightDrawableSlotWidth(rightDrawable);
+                    rightDrawableWidth += slotWidth;
+                    width -= slotWidth;
+                }
+                if (isRightDrawableVisible(rightDrawable2) && !rightDrawableOutside) {
+                    int slotWidth = getRightDrawableSlotWidth(rightDrawable2);
+                    rightDrawableWidth += slotWidth;
+                    width -= slotWidth;
+                }
+            }
+            if (replacedText != null && replacedDrawable != null) {
+                if ((replacingDrawableTextIndex = text.toString().indexOf(replacedText)) < 0) {
+                    width -= replacedDrawable.getIntrinsicWidth();
+                    width -= drawablePadding;
+                }
+            }
+            if (canHideRightDrawable && rightDrawableWidth != 0 && !rightDrawableOutside) {
+                CharSequence string = TextUtils.ellipsize(text, textPaint, width, TextUtils.TruncateAt.END);
+                if (!sameTextCharacters(text, string)) {
+                    rightDrawableHidden = true;
+                    width += rightDrawableWidth;
+                }
+            }
+            calcOffset(width);
+
+            invalidate();
+        }
+    }
+
+    private void checkUi_layerType() {
+        final boolean fade = scrollNonFitText && (textDoesNotFit || scrollingOffset != 0);
+        final boolean needHardwareLayer = fade || ellipsizeByGradient;
+        final int layerType = needHardwareLayer ? LAYER_TYPE_HARDWARE : LAYER_TYPE_NONE;
+        if (getLayerType() != layerType) {
+            setLayerType(layerType, null);
+            invalidate();
+        }
+    }
+
+    @Override
+    protected void onDraw(Canvas canvas) {
+        if (canvas.isHardwareAccelerated()) {
+            updateScrollAnimation();
+        }
+        lastDrawnScrollingOffset = scrollingOffset;
+        super.onDraw(canvas);
+        int textOffsetX = 0;
+        layoutX = 0;
+        layoutY = 0;
+
+        boolean fade = scrollNonFitText && (textDoesNotFit || scrollingOffset != 0);
+        final int scrollingLeft = leftDrawableOutside && leftDrawable != null
+                ? drawablePadding + leftDrawable.getIntrinsicWidth() : 0;
+        final int scrollingRight = Math.max(scrollingLeft, getMaxTextWidth() - paddingRight
+                - getOutsideRightDrawableTextClipInset());
+        if (fade) {
+            canvas.save();
+            canvas.clipRect(scrollingLeft, 0, scrollingRight, getMeasuredHeight());
+        }
+        totalWidth = textWidth;
+        if (leftDrawable != null && !leftDrawableOutside) {
+            int x = (int) -scrollingOffset;
+            if ((gravity & Gravity.HORIZONTAL_GRAVITY_MASK) == Gravity.CENTER_HORIZONTAL) {
+                x += offsetX;
+            }
+            int y;
+            if ((gravity & Gravity.VERTICAL_GRAVITY_MASK) == Gravity.CENTER_VERTICAL) {
+                y = (getMeasuredHeight() - leftDrawable.getIntrinsicHeight()) / 2 + leftDrawableTopPadding;
+            } else {
+                y = getPaddingTop() + (textHeight - leftDrawable.getIntrinsicHeight()) / 2 + leftDrawableTopPadding;
+            }
+            leftDrawable.setBounds(x, y, x + leftDrawable.getIntrinsicWidth(), y + leftDrawable.getIntrinsicHeight());
+            leftDrawable.draw(canvas);
+            if ((gravity & Gravity.HORIZONTAL_GRAVITY_MASK) == Gravity.LEFT || (gravity & Gravity.HORIZONTAL_GRAVITY_MASK) == Gravity.CENTER_HORIZONTAL) {
+                textOffsetX += drawablePadding + leftDrawable.getIntrinsicWidth();
+            }
+            totalWidth += drawablePadding + leftDrawable.getIntrinsicWidth();
+        } else if (leftDrawableOutside && leftDrawable != null) {
+            textOffsetX += drawablePadding + leftDrawable.getIntrinsicWidth();
+        }
+        if (replacedDrawable != null && replacedText != null) {
+            int x = (int) (-scrollingOffset + replacingDrawableTextOffset);
+            if ((gravity & Gravity.HORIZONTAL_GRAVITY_MASK) == Gravity.CENTER_HORIZONTAL) {
+                x += offsetX;
+            }
+            int y;
+            if ((gravity & Gravity.VERTICAL_GRAVITY_MASK) == Gravity.CENTER_VERTICAL) {
+                y = (getMeasuredHeight() - replacedDrawable.getIntrinsicHeight()) / 2 + leftDrawableTopPadding;
+            } else {
+                y = (textHeight - replacedDrawable.getIntrinsicHeight()) / 2 + leftDrawableTopPadding;
+            }
+            replacedDrawable.setBounds(x, y, x + replacedDrawable.getIntrinsicWidth(), y + replacedDrawable.getIntrinsicHeight());
+            replacedDrawable.draw(canvas);
+            if (replacingDrawableTextIndex < 0) {
+                if ((gravity & Gravity.HORIZONTAL_GRAVITY_MASK) == Gravity.LEFT || (gravity & Gravity.HORIZONTAL_GRAVITY_MASK) == Gravity.CENTER_HORIZONTAL) {
+                    textOffsetX += drawablePadding + replacedDrawable.getIntrinsicWidth();
+                }
+                totalWidth += drawablePadding + replacedDrawable.getIntrinsicWidth();
+            }
+        }
+
+        if (isRightDrawableVisible(rightDrawable) && !rightDrawableHidden && !rightDrawableOutside && !rightDrawableInside) {
+            int x = textOffsetX + textWidth + drawablePadding + (int) -scrollingOffset;
+            if ((gravity & Gravity.HORIZONTAL_GRAVITY_MASK) == Gravity.CENTER_HORIZONTAL ||
+                    (gravity & Gravity.HORIZONTAL_GRAVITY_MASK) == Gravity.RIGHT) {
+                x += offsetX;
+            }
+            int dw = (int) (rightDrawable.getIntrinsicWidth() * rightDrawableScale);
+            int dh = (int) (rightDrawable.getIntrinsicHeight() * rightDrawableScale);
+            int y;
+            if ((gravity & Gravity.VERTICAL_GRAVITY_MASK) == Gravity.CENTER_VERTICAL) {
+                y = (getMeasuredHeight() - dh) / 2 + rightDrawableTopPadding;
+            } else {
+                y = getPaddingTop() + (textHeight - dh) / 2 + rightDrawableTopPadding;
+            }
+            rightDrawable.setBounds(x, y, x + dw, y + dh);
+            rightDrawableX = x + (dw >> 1);
+            rightDrawableY = y + (dh >> 1);
+            rightDrawable.draw(canvas);
+            totalWidth += drawablePadding + dw;
+        }
+        if (isRightDrawableVisible(rightDrawable2) && !rightDrawableHidden && !rightDrawableOutside && !rightDrawableInside) {
+            int x = textOffsetX + textWidth + drawablePadding + (int) -scrollingOffset;
+            if (isRightDrawableVisible(rightDrawable)) {
+                x += (int) (rightDrawable.getIntrinsicWidth() * rightDrawableScale) + drawablePadding;
+            }
+            if ((gravity & Gravity.HORIZONTAL_GRAVITY_MASK) == Gravity.CENTER_HORIZONTAL ||
+                    (gravity & Gravity.HORIZONTAL_GRAVITY_MASK) == Gravity.RIGHT) {
+                x += offsetX;
+            }
+            int dw = (int) (rightDrawable2.getIntrinsicWidth() * rightDrawableScale);
+            int dh = (int) (rightDrawable2.getIntrinsicHeight() * rightDrawableScale);
+            int y;
+            if ((gravity & Gravity.VERTICAL_GRAVITY_MASK) == Gravity.CENTER_VERTICAL) {
+                y = (getMeasuredHeight() - dh) / 2 + rightDrawableTopPadding;
+            } else {
+                y = getPaddingTop() + (textHeight - dh) / 2 + rightDrawableTopPadding;
+            }
+            rightDrawable2.setBounds(x, y, x + dw, y + dh);
+            rightDrawable2.draw(canvas);
+            totalWidth += drawablePadding + dw;
+        }
+        int nextScrollX = totalWidth + dp(DIST_BETWEEN_SCROLLING_TEXT);
+
+        if (scrollingOffset != 0) {
+            if (leftDrawable != null && !leftDrawableOutside) {
+                int x = (int) -scrollingOffset + nextScrollX;
+                if ((gravity & Gravity.HORIZONTAL_GRAVITY_MASK) == Gravity.CENTER_HORIZONTAL) {
+                    x += offsetX;
+                }
+                int y;
+                if ((gravity & Gravity.VERTICAL_GRAVITY_MASK) == Gravity.CENTER_VERTICAL) {
+                    y = (getMeasuredHeight() - leftDrawable.getIntrinsicHeight()) / 2 + leftDrawableTopPadding;
+                } else {
+                    y = getPaddingTop() + (textHeight - leftDrawable.getIntrinsicHeight()) / 2 + leftDrawableTopPadding;
+                }
+                leftDrawable.setBounds(x, y, x + leftDrawable.getIntrinsicWidth(), y + leftDrawable.getIntrinsicHeight());
+                leftDrawable.draw(canvas);
+            }
+            if (isRightDrawableVisible(rightDrawable) && !rightDrawableHidden && !rightDrawableOutside && !rightDrawableInside) {
+                int dw = (int) (rightDrawable.getIntrinsicWidth() * rightDrawableScale);
+                int dh = (int) (rightDrawable.getIntrinsicHeight() * rightDrawableScale);
+                int x = textOffsetX + textWidth + drawablePadding + (int) -scrollingOffset + nextScrollX;
+                // NimarkoGram: marquee branch must honour center/right offset like the non-scrolling
+                // path, else a centered title's right badge is drawn at the left (looks "behind" the text).
+                if ((gravity & Gravity.HORIZONTAL_GRAVITY_MASK) == Gravity.CENTER_HORIZONTAL ||
+                        (gravity & Gravity.HORIZONTAL_GRAVITY_MASK) == Gravity.RIGHT) {
+                    x += offsetX;
+                }
+                int y;
+                if ((gravity & Gravity.VERTICAL_GRAVITY_MASK) == Gravity.CENTER_VERTICAL) {
+                    y = (getMeasuredHeight() - dh) / 2 + rightDrawableTopPadding;
+                } else {
+                    y = getPaddingTop() + (textHeight - dh) / 2 + rightDrawableTopPadding;
+                }
+                rightDrawable.setBounds(x, y, x + dw, y + dh);
+                rightDrawableX = x + (dw >> 1);
+                rightDrawableY = y + (dh >> 1);
+                rightDrawable.draw(canvas);
+            }
+            if (isRightDrawableVisible(rightDrawable2) && !rightDrawableHidden && !rightDrawableOutside && !rightDrawableInside) {
+                int dw = (int) (rightDrawable2.getIntrinsicWidth() * rightDrawableScale);
+                int dh = (int) (rightDrawable2.getIntrinsicHeight() * rightDrawableScale);
+                int x = textOffsetX + textWidth + drawablePadding + (int) -scrollingOffset + nextScrollX;
+                if (isRightDrawableVisible(rightDrawable)) {
+                    x += (int) (rightDrawable.getIntrinsicWidth() * rightDrawableScale) + drawablePadding;
+                }
+                if ((gravity & Gravity.HORIZONTAL_GRAVITY_MASK) == Gravity.CENTER_HORIZONTAL ||
+                        (gravity & Gravity.HORIZONTAL_GRAVITY_MASK) == Gravity.RIGHT) {
+                    x += offsetX;
+                }
+                int y;
+                if ((gravity & Gravity.VERTICAL_GRAVITY_MASK) == Gravity.CENTER_VERTICAL) {
+                    y = (getMeasuredHeight() - dh) / 2 + rightDrawableTopPadding;
+                } else {
+                    y = getPaddingTop() + (textHeight - dh) / 2 + rightDrawableTopPadding;
+                }
+                rightDrawable2.setBounds(x, y, x + dw, y + dh);
+                rightDrawable2.draw(canvas);
+            }
+        }
+
+        if (layout != null) {
+            if (!fade && (leftDrawableOutside || rightDrawableOutside || ellipsizeByGradient || paddingRight > 0)) {
+                canvas.save();
+                canvas.clipRect(textOffsetX, 0, getMaxTextWidth() - paddingRight
+                        - getOutsideRightDrawableTextClipInset(), getMeasuredHeight());
+            }
+            Emoji.emojiDrawingUseAlpha = usaAlphaForEmoji;
+            if (wrapBackgroundDrawable != null) {
+                int cx = (int) (offsetX + textOffsetX - scrollingOffset) + textWidth / 2;
+                int w = Math.max(textWidth + getPaddingLeft() + getPaddingRight(), minWidth);
+                int x = cx - w / 2;
+                wrapBackgroundDrawable.setBounds(x, 0, x + w, getMeasuredHeight());
+                wrapBackgroundDrawable.draw(canvas);
+            }
+            if (offsetX + textOffsetX != 0 || offsetY != 0 || scrollingOffset != 0) {
+                canvas.save();
+                canvas.translate(offsetX + textOffsetX - scrollingOffset, offsetY);
+                layoutX += offsetX + textOffsetX - scrollingOffset;
+                layoutY += offsetY;
+            }
+            drawLayout(canvas);
+            if (partLayout != null && fullAlpha < 1.0f) {
+                int prevAlpha = textPaint.getAlpha();
+                textPaint.setAlpha((int) (255 * (1.0f - fullAlpha)));
+                canvas.save();
+                float partOffset = 0;
+                if (partLayout.getText().length() == 1) {
+                    partOffset = fullTextMaxLines == 1 ? dp(0.5f) : dp(4);
+                }
+                if (layout.getLineLeft(0) != 0) {
+                    canvas.translate(-layout.getLineWidth(0) + partOffset, 0);
+                } else {
+                    canvas.translate(layout.getLineWidth(0) - partOffset, 0);
+                }
+                canvas.translate(-fullLayoutLeftOffset * fullAlpha + fullLayoutLeftCharactersOffset * fullAlpha, 0);
+                partLayout.draw(canvas);
+                canvas.restore();
+                textPaint.setAlpha(prevAlpha);
+            }
+            if (fullLayout != null && fullAlpha > 0) {
+                int prevAlpha = textPaint.getAlpha();
+                textPaint.setAlpha((int) (255 * fullAlpha));
+
+                canvas.translate(-fullLayoutLeftOffset * fullAlpha + fullLayoutLeftCharactersOffset * fullAlpha - fullLayoutLeftCharactersOffset, 0);
+                fullLayout.draw(canvas);
+                textPaint.setAlpha(prevAlpha);
+            }
+            if (scrollingOffset != 0) {
+                canvas.translate(nextScrollX, 0);
+                drawLayout(canvas);
+            }
+            if (offsetX + textOffsetX != 0 || offsetY != 0 || scrollingOffset != 0) {
+                canvas.restore();
+            }
+            if (isRightDrawableVisible(rightDrawable) && !rightDrawableHidden && !rightDrawableOutside && rightDrawableInside) {
+                int x = textOffsetX + textWidth + drawablePadding + (int) -scrollingOffset;
+                if ((gravity & Gravity.HORIZONTAL_GRAVITY_MASK) == Gravity.CENTER_HORIZONTAL ||
+                        (gravity & Gravity.HORIZONTAL_GRAVITY_MASK) == Gravity.RIGHT) {
+                    x += offsetX;
+                }
+                int dw = (int) (rightDrawable.getIntrinsicWidth() * rightDrawableScale);
+                int dh = (int) (rightDrawable.getIntrinsicHeight() * rightDrawableScale);
+                int y;
+                if ((gravity & Gravity.VERTICAL_GRAVITY_MASK) == Gravity.CENTER_VERTICAL) {
+                    y = (getMeasuredHeight() - dh) / 2 + rightDrawableTopPadding;
+                } else {
+                    y = getPaddingTop() + (textHeight - dh) / 2 + rightDrawableTopPadding;
+                }
+                rightDrawable.setBounds(x, y, x + dw, y + dh);
+                rightDrawableX = x + (dw >> 1);
+                rightDrawableY = y + (dh >> 1);
+                rightDrawable.draw(canvas);
+                totalWidth += drawablePadding + dw;
+            }
+            if (isRightDrawableVisible(rightDrawable2) && !rightDrawableHidden && !rightDrawableOutside && rightDrawableInside) {
+                int x = textOffsetX + textWidth + drawablePadding + (int) -scrollingOffset;
+                if (isRightDrawableVisible(rightDrawable)) {
+                    x += (int) (rightDrawable.getIntrinsicWidth() * rightDrawableScale) + drawablePadding;
+                }
+                if ((gravity & Gravity.HORIZONTAL_GRAVITY_MASK) == Gravity.CENTER_HORIZONTAL ||
+                        (gravity & Gravity.HORIZONTAL_GRAVITY_MASK) == Gravity.RIGHT) {
+                    x += offsetX;
+                }
+                int dw = (int) (rightDrawable2.getIntrinsicWidth() * rightDrawableScale);
+                int dh = (int) (rightDrawable2.getIntrinsicHeight() * rightDrawableScale);
+                int y;
+                if ((gravity & Gravity.VERTICAL_GRAVITY_MASK) == Gravity.CENTER_VERTICAL) {
+                    y = (getMeasuredHeight() - dh) / 2 + rightDrawableTopPadding;
+                } else {
+                    y = getPaddingTop() + (textHeight - dh) / 2 + rightDrawableTopPadding;
+                }
+                rightDrawable2.setBounds(x, y, x + dw, y + dh);
+                rightDrawable2.draw(canvas);
+                totalWidth += drawablePadding + dw;
+            }
+            if (fade) {
+                if (scrollingOffset < dp(10)) {
+                    fadePaint.setAlpha((int) (255 * (scrollingOffset / dp(10))));
+                } else if (scrollingOffset > totalWidth + dp(DIST_BETWEEN_SCROLLING_TEXT) - dp(10)) {
+                    float dist = scrollingOffset - (totalWidth + dp(DIST_BETWEEN_SCROLLING_TEXT) - dp(10));
+                    fadePaint.setAlpha((int) (255 * (1.0f - dist / dp(10))));
+                } else {
+                    fadePaint.setAlpha(255);
+                }
+                canvas.save();
+                canvas.translate(scrollingLeft, 0);
+                canvas.drawRect(0, 0, dp(6), getMeasuredHeight(), fadePaint);
+                canvas.restore();
+                canvas.save();
+                canvas.translate(scrollingRight - dp(6), 0);
+                canvas.drawRect(0, 0, 0 + dp(6), getMeasuredHeight(), fadePaintBack);
+                canvas.restore();
+            } else if (ellipsizeByGradient && textDoesNotFit && fadeEllpsizePaint != null) {
+                canvas.save();
+                updateFadePaints();
+                fadeEllpsizePaint.setAlpha(Math.round(255f * Math.min(1f,
+                        textOverflow / Math.max(1, fadeEllpsizePaintWidth))));
+                if (!ellipsizeByGradientLeft) {
+                    canvas.translate(getMaxTextWidth() - paddingRight - fadeEllpsizePaintWidth
+                            - getOutsideRightDrawableTextClipInset(), 0);
+                } else {
+                    canvas.translate(textOffsetX, 0);
+                }
+                canvas.drawRect(0, 0, fadeEllpsizePaintWidth, getMeasuredHeight(), fadeEllpsizePaint);
+                canvas.restore();
+            }
+            Emoji.emojiDrawingUseAlpha = true;
+            if (!fade && (leftDrawableOutside || rightDrawableOutside || ellipsizeByGradient || paddingRight > 0)) {
+                canvas.restore();
+            }
+        }
+
+        if (fade) {
+            canvas.restore();
+        }
+
+        if (leftDrawable != null && leftDrawableOutside) {
+            int x = 0;
+            int dw = (int) (leftDrawable.getIntrinsicWidth());
+            int dh = (int) (leftDrawable.getIntrinsicHeight());
+            int y;
+            if ((gravity & Gravity.VERTICAL_GRAVITY_MASK) == Gravity.CENTER_VERTICAL) {
+                y = (getMeasuredHeight() - dh) / 2 + leftDrawableTopPadding;
+            } else {
+                y = getPaddingTop() + (textHeight - dh) / 2 + leftDrawableTopPadding;
+            }
+            leftDrawable.setBounds(x, y, x + dw, y + dh);
+            leftDrawable.draw(canvas);
+        }
+        final boolean drawOutsideRight = rightDrawableOutside
+                && (isRightDrawableVisible(rightDrawable) || isRightDrawableVisible(rightDrawable2));
+        final int outsideRightStart = drawOutsideRight
+                ? getOutsideRightDrawablesStartX(textOffsetX) : 0;
+        if (drawOutsideRight) {
+            canvas.save();
+            canvas.clipRect(0, 0, getDrawableContentWidth(), getMeasuredHeight());
+        }
+        int outsideRightOffset = 0;
+        if (isRightDrawableVisible(rightDrawable) && rightDrawableOutside) {
+            int x = outsideRightStart + drawablePadding;
+            int dw = (int) (rightDrawable.getIntrinsicWidth() * rightDrawableScale);
+            int dh = (int) (rightDrawable.getIntrinsicHeight() * rightDrawableScale);
+            int y;
+            if ((gravity & Gravity.VERTICAL_GRAVITY_MASK) == Gravity.CENTER_VERTICAL) {
+                y = (getMeasuredHeight() - dh) / 2 + rightDrawableTopPadding;
+            } else {
+                y = getPaddingTop() + (textHeight - dh) / 2 + rightDrawableTopPadding;
+            }
+            rightDrawable.setBounds(x, y, x + dw, y + dh);
+            rightDrawableX = x + (dw >> 1);
+            rightDrawableY = y + (dh >> 1);
+            rightDrawable.draw(canvas);
+            outsideRightOffset += drawablePadding + dw;
+        }
+        if (isRightDrawableVisible(rightDrawable2) && rightDrawableOutside) {
+            int x = outsideRightStart + outsideRightOffset + drawablePadding;
+            int dw = (int) (rightDrawable2.getIntrinsicWidth() * rightDrawableScale);
+            int dh = (int) (rightDrawable2.getIntrinsicHeight() * rightDrawableScale);
+            int y;
+            if ((gravity & Gravity.VERTICAL_GRAVITY_MASK) == Gravity.CENTER_VERTICAL) {
+                y = (getMeasuredHeight() - dh) / 2 + rightDrawableTopPadding;
+            } else {
+                y = getPaddingTop() + (textHeight - dh) / 2 + rightDrawableTopPadding;
+            }
+            rightDrawable2.setBounds(x, y, x + dw, y + dh);
+            rightDrawable2.draw(canvas);
+        }
+        if (drawOutsideRight) {
+            canvas.restore();
+        }
+    }
+
+    public int getRightDrawableX() {
+        return rightDrawableX;
+    }
+
+    public int getRightDrawableY() {
+        return rightDrawableY;
+    }
+
+    public int getMaxTextWidth() {
+        return getMeasuredWidth() - getOutsideRightDrawablesWidth();
+    }
+
+    public float getExactWidth() {
+        float exactTextWidth = layout != null ? textWidth : getPaint().measureText(getText().toString());
+        return exactTextWidth + getSideDrawablesSize();
+    }
+
+    public float getExactWidthIncludeDrawables() {
+        return getExactWidth();
+    }
+
+    private void drawLayout(Canvas canvas) {
+        if (fullAlpha > 0 && fullLayoutLeftOffset != 0) {
+            canvas.save();
+            canvas.translate(-fullLayoutLeftOffset * fullAlpha + fullLayoutLeftCharactersOffset * fullAlpha, 0);
+            layoutX += -fullLayoutLeftOffset * fullAlpha + fullLayoutLeftCharactersOffset * fullAlpha;
+
+            canvas.save();
+            clipOutSpoilers(canvas);
+            if (emojiStack != null) {
+                emojiStack.clearPositions();
+            }
+            layout.draw(canvas);
+            canvas.restore();
+
+            AnimatedEmojiSpan.drawAnimatedEmojis(canvas, layout, emojiStack, 0, null, 0, 0, 0, 1f, emojiStackColorFilter);
+            drawSpoilers(canvas);
+            canvas.restore();
+        } else {
+            canvas.save();
+            clipOutSpoilers(canvas);
+            if (emojiStack != null) {
+                emojiStack.clearPositions();
+            }
+            layout.draw(canvas);
+            canvas.restore();
+
+            AnimatedEmojiSpan.drawAnimatedEmojis(canvas, layout, emojiStack, 0, null, 0, 0, 0, 1f, emojiStackColorFilter);
+            drawSpoilers(canvas);
+        }
+    }
+
+    private void clipOutSpoilers(Canvas canvas) {
+        if (spoilers.isEmpty()) {
+            // nothing to clip
+            return;
+        }
+        path.rewind();
+        for (SpoilerEffect eff : spoilers) {
+            Rect b = eff.getBounds();
+            path.addRect(b.left, b.top, b.right, b.bottom, Path.Direction.CW);
+        }
+        canvas.clipPath(path, Region.Op.DIFFERENCE);
+    }
+
+    private void drawSpoilers(Canvas canvas) {
+        for (SpoilerEffect eff : spoilers)
+            eff.draw(canvas);
+    }
+
+    private void updateScrollAnimation() {
+        if (!scrollNonFitText || !textDoesNotFit && scrollingOffset == 0) {
+            return;
+        }
+        if (!isScrollPresentationVisible()) {
+            pauseScrollAnimation();
+            return;
+        }
+        long newUpdateTime = NimarkoUiAnimationClock.now();
+        long dt = lastUpdateTime == 0 ? 0 : Math.max(0, newUpdateTime - lastUpdateTime);
+        lastUpdateTime = newUpdateTime;
+        if (dt > 17) {
+            dt = 17;
+        }
+        if (marqueeResumePending) {
+            marqueeResumePending = false;
+            marqueeResumeElapsedMs = 0;
+            dt = 0;
+        }
+        if (currentScrollDelay > 0) {
+            currentScrollDelay -= dt;
+        } else {
+            int totalDistance = totalWidth + dp(DIST_BETWEEN_SCROLLING_TEXT);
+            float pixelsPerSecond;
+            if (scrollingOffset < dp(SCROLL_SLOWDOWN_PX)) {
+                pixelsPerSecond = PIXELS_PER_SECOND_SLOW + (PIXELS_PER_SECOND - PIXELS_PER_SECOND_SLOW) * (scrollingOffset / dp(SCROLL_SLOWDOWN_PX));
+            } else if (scrollingOffset >= totalDistance - dp(SCROLL_SLOWDOWN_PX)) {
+                float dist = scrollingOffset - (totalDistance - dp(SCROLL_SLOWDOWN_PX));
+                pixelsPerSecond = PIXELS_PER_SECOND - (PIXELS_PER_SECOND - PIXELS_PER_SECOND_SLOW) * (dist / dp(SCROLL_SLOWDOWN_PX));
+            } else {
+                pixelsPerSecond = PIXELS_PER_SECOND;
+            }
+            float movementMs = dt;
+            if (dt > 0 && marqueeResumeElapsedMs < MARQUEE_RESUME_DURATION_MS) {
+                long rampMs = Math.min(dt, MARQUEE_RESUME_DURATION_MS - marqueeResumeElapsedMs);
+                float start = marqueeResumeElapsedMs / (float) MARQUEE_RESUME_DURATION_MS;
+                float end = (marqueeResumeElapsedMs + rampMs) / (float) MARQUEE_RESUME_DURATION_MS;
+                float startIntegral = start * start * start * (1f - start * .5f);
+                float endIntegral = end * end * end * (1f - end * .5f);
+                movementMs = (endIntegral - startIntegral) * MARQUEE_RESUME_DURATION_MS + dt - rampMs;
+                marqueeResumeElapsedMs += rampMs;
+            }
+            scrollingOffset += movementMs / 1000.0f * dp(pixelsPerSecond);
+            lastUpdateTime = newUpdateTime;
+            if (scrollingOffset > totalDistance) {
+                scrollingOffset = 0;
+                currentScrollDelay = SCROLL_DELAY_MS;
+                marqueeResumeElapsedMs = MARQUEE_RESUME_DURATION_MS;
+            }
+            checkUi_layerType();
+        }
+        invalidate();
+    }
+
+    @Override
+    public void invalidateDrawable(Drawable who) {
+        if (who == rightDrawable || who == rightDrawable2) {
+            updateRightDrawableLayoutIfNeeded();
+        }
+        if (who == leftDrawable) {
+            invalidate(leftDrawable.getBounds());
+        } else if (who == rightDrawable) {
+            invalidate(rightDrawable.getBounds());
+        } else if (who == rightDrawable2) {
+            invalidate(rightDrawable2.getBounds());
+        } else if (who == replacedDrawable) {
+            invalidate(replacedDrawable.getBounds());
+        }
+    }
+
+    @Override
+    public boolean hasOverlappingRendering() {
+        return false;
+    }
+
+    @Override
+    public void onInitializeAccessibilityNodeInfo(AccessibilityNodeInfo info) {
+        super.onInitializeAccessibilityNodeInfo(info);
+        info.setVisibleToUser(true);
+        info.setClassName("android.widget.TextView");
+        info.setText(text);
+        boolean rightVisible = !TextUtils.isEmpty(rightDrawableContentDescription)
+                && isRightDrawableInteractive(rightDrawable);
+        boolean right2Visible = !TextUtils.isEmpty(rightDrawable2ContentDescription)
+                && isRightDrawableInteractive(rightDrawable2);
+        if (rightVisible || right2Visible) {
+            StringBuilder description = new StringBuilder();
+            if (!TextUtils.isEmpty(text)) description.append(text);
+            if (rightVisible) {
+                if (description.length() > 0) description.append(", ");
+                description.append(rightDrawableContentDescription);
+            }
+            if (right2Visible) {
+                if (description.length() > 0) description.append(", ");
+                description.append(rightDrawable2ContentDescription);
+            }
+            info.setContentDescription(description);
+            if (rightVisible && rightDrawableOnClickListener != null) {
+                info.addAction(new AccessibilityNodeInfo.AccessibilityAction(
+                        R.id.acc_action_right_drawable, rightDrawableContentDescription));
+            }
+            if (right2Visible && rightDrawable2OnClickListener != null) {
+                info.addAction(new AccessibilityNodeInfo.AccessibilityAction(
+                        R.id.acc_action_right_drawable2, rightDrawable2ContentDescription));
+            }
+            info.setClickable((rightVisible && rightDrawableOnClickListener != null)
+                    || (right2Visible && rightDrawable2OnClickListener != null));
+        }
+    }
+
+    @Override
+    public boolean performAccessibilityAction(int action, Bundle arguments) {
+        if (action == R.id.acc_action_right_drawable2
+                && rightDrawable2OnClickListener != null && isRightDrawableInteractive(rightDrawable2)
+                && !TextUtils.isEmpty(rightDrawable2ContentDescription)) {
+            rightDrawable2OnClickListener.onClick(this);
+            return true;
+        }
+        if (action == R.id.acc_action_right_drawable
+                && rightDrawableOnClickListener != null && isRightDrawableInteractive(rightDrawable)
+                && !TextUtils.isEmpty(rightDrawableContentDescription)) {
+            rightDrawableOnClickListener.onClick(this);
+            return true;
+        }
+        return super.performAccessibilityAction(action, arguments);
+    }
+
+    public void setFullLayoutAdditionalWidth(int fullLayoutAdditionalWidth, int fullLayoutLeftOffset) {
+        if (this.fullLayoutAdditionalWidth != fullLayoutAdditionalWidth || this.fullLayoutLeftOffset != fullLayoutLeftOffset) {
+            this.fullLayoutAdditionalWidth = fullLayoutAdditionalWidth;
+            this.fullLayoutLeftOffset = fullLayoutLeftOffset;
+            createLayout(getMaxTextWidth() - getPaddingLeft() - getPaddingRight() - minusWidth);
+        }
+    }
+
+    public void setFullTextMaxLines(int fullTextMaxLines) {
+        this.fullTextMaxLines = fullTextMaxLines;
+    }
+
+    public int getTextColor() {
+        return textPaint.getColor();
+    }
+
+    public void setCanHideRightDrawable(boolean b) {
+        canHideRightDrawable = b;
+    }
+
+    public void setRightDrawableOutside(boolean outside) {
+        if (rightDrawableOutside == outside) {
+            return;
+        }
+        rightDrawableOutside = outside;
+        recreateLayoutMaybe();
+    }
+
+    /**
+     * Extra visual separation between text and a static outside trailing
+     * drawable. Compact containers which already reserve a measured drawable
+     * slot can set this to zero to avoid clipping the final glyph.
+     */
+    public void setOutsideRightDrawableTextClipInset(int inset) {
+        inset = Math.max(0, inset);
+        if (outsideRightDrawableTextClipInset == inset) {
+            return;
+        }
+        outsideRightDrawableTextClipInset = inset;
+        invalidate();
+    }
+
+    public void setLeftDrawableOutside(boolean outside) {
+        leftDrawableOutside = outside;
+    }
+
+    // right drawable is ellipsized with text
+    public void setRightDrawableInside(boolean inside) {
+        if (rightDrawableInside == inside) {
+            return;
+        }
+        rightDrawableInside = inside;
+        recreateLayoutMaybe();
+    }
+
+
+    public boolean getRightDrawableOutside() {
+        return rightDrawableOutside;
+    }
+
+    public void setRightDrawableOnClick(OnClickListener onClickListener) {
+        rightDrawableOnClickListener = onClickListener;
+    }
+
+    public void setRightDrawableContentDescription(CharSequence description) {
+        rightDrawableContentDescription = description;
+        sendAccessibilityEvent(android.view.accessibility.AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED);
+    }
+
+    // NimarkoGram: slot-2 click listener for extera-style badges drawn in
+    // rightDrawable2. Hit-test uses the drawable's bounds (already set by the
+    // draw pass), so no extra fields are needed.
+    private OnClickListener rightDrawable2OnClickListener;
+    private boolean maybeClick2;
+    public void setRightDrawable2OnClick(OnClickListener onClickListener) {
+        rightDrawable2OnClickListener = onClickListener;
+    }
+
+    public void setRightDrawable2ContentDescription(CharSequence description) {
+        rightDrawable2ContentDescription = description;
+        sendAccessibilityEvent(android.view.accessibility.AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED);
+    }
+
+    @Override
+    public boolean onTouchEvent(MotionEvent event) {
+        if (maybeClick && !isRightDrawableInteractive(rightDrawable)) {
+            maybeClick = false;
+            if (rightDrawable instanceof PressableDrawable) {
+                ((PressableDrawable) rightDrawable).setPressed(false);
+            }
+            if (getParent() != null) getParent().requestDisallowInterceptTouchEvent(false);
+        }
+        if (maybeClick2 && !isRightDrawableInteractive(rightDrawable2)) {
+            maybeClick2 = false;
+            if (getParent() != null) getParent().requestDisallowInterceptTouchEvent(false);
+        }
+        if (rightDrawableOnClickListener != null && isRightDrawableInteractive(rightDrawable)) {
+            AndroidUtilities.rectTmp.set(rightDrawableX - dp(16), rightDrawableY - dp(16), rightDrawableX + dp(16), rightDrawableY + dp(16));
+            if (event.getAction() == MotionEvent.ACTION_DOWN && AndroidUtilities.rectTmp.contains((int) event.getX(), (int) event.getY())) {
+                maybeClick = true;
+                touchDownX = event.getX();
+                touchDownY = event.getY();
+                getParent().requestDisallowInterceptTouchEvent(true);
+                if (rightDrawable instanceof PressableDrawable) {
+                    ((PressableDrawable) rightDrawable).setPressed(true);
+                }
+            } else if (event.getAction() == MotionEvent.ACTION_MOVE && maybeClick) {
+                if (Math.abs(event.getX() - touchDownX) >= AndroidUtilities.touchSlop || Math.abs(event.getY() - touchDownY) >= AndroidUtilities.touchSlop) {
+                    maybeClick = false;
+                    getParent().requestDisallowInterceptTouchEvent(false);
+                    if (rightDrawable instanceof PressableDrawable) {
+                        ((PressableDrawable) rightDrawable).setPressed(false);
+                    }
+                }
+            } else if (event.getAction() == MotionEvent.ACTION_UP || event.getAction() == MotionEvent.ACTION_CANCEL) {
+                if (maybeClick && event.getAction() == MotionEvent.ACTION_UP) {
+                    rightDrawableOnClickListener.onClick(this);
+                    if (rightDrawable instanceof PressableDrawable) {
+                        ((PressableDrawable) rightDrawable).setPressed(false);
+                    }
+                }
+                maybeClick = false;
+                getParent().requestDisallowInterceptTouchEvent(false);
+            }
+        }
+        if (rightDrawable2OnClickListener != null && isRightDrawableInteractive(rightDrawable2)) {
+            android.graphics.Rect b = rightDrawable2.getBounds();
+            AndroidUtilities.rectTmp.set(b.left - dp(8), b.top - dp(8), b.right + dp(8), b.bottom + dp(8));
+            if (event.getAction() == MotionEvent.ACTION_DOWN && AndroidUtilities.rectTmp.contains((int) event.getX(), (int) event.getY())) {
+                maybeClick2 = true;
+                touchDownX = event.getX();
+                touchDownY = event.getY();
+                getParent().requestDisallowInterceptTouchEvent(true);
+            } else if (event.getAction() == MotionEvent.ACTION_MOVE && maybeClick2) {
+                if (Math.abs(event.getX() - touchDownX) >= AndroidUtilities.touchSlop || Math.abs(event.getY() - touchDownY) >= AndroidUtilities.touchSlop) {
+                    maybeClick2 = false;
+                    getParent().requestDisallowInterceptTouchEvent(false);
+                }
+            } else if (event.getAction() == MotionEvent.ACTION_UP || event.getAction() == MotionEvent.ACTION_CANCEL) {
+                if (maybeClick2 && event.getAction() == MotionEvent.ACTION_UP) {
+                    rightDrawable2OnClickListener.onClick(this);
+                }
+                maybeClick2 = false;
+                getParent().requestDisallowInterceptTouchEvent(false);
+            }
+        }
+        return super.onTouchEvent(event) || maybeClick || maybeClick2;
+    }
+
+    public static interface PressableDrawable {
+        public void setPressed(boolean value);
+
+        public boolean isPressed();
+    }
+}
