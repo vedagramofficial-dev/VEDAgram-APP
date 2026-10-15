@@ -3,6 +3,11 @@ name: VEDAgram Android Build
 
 on:
   workflow_dispatch:
+    inputs:
+      version_name:
+        description: "VEDAgram version name"
+        required: true
+        default: "1.0.0"
 
 permissions:
   contents: read
@@ -13,11 +18,9 @@ jobs:
     timeout-minutes: 120
 
     steps:
-      - name: Checkout NimarkoGram with submodules
+      - name: Checkout VEDAgram source
         uses: actions/checkout@v4
         with:
-          repository: Ettacent/NimarkoGram
-          ref: main
           submodules: recursive
           fetch-depth: 0
 
@@ -25,12 +28,69 @@ jobs:
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '17'
+          java-version: "17"
 
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.11"
+
+      - name: Apply VEDAgram branding
+        env:
+          APP_VERSION: ${{ inputs.version_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          roots = [
+              Path("TMessagesProj/src/main/res"),
+              Path("TMessagesProj_App/src/main/res"),
+          ]
+
+          replacements = {
+              "AppName": "VEDAgram",
+              "AppNameBeta": "VEDAgram Beta",
+              "exteraAppName": "VEDAgram",
+          }
+
+          changed = 0
+
+          for root in roots:
+              if not root.exists():
+                  continue
+
+              for file in root.glob("values*/strings.xml"):
+                  text = file.read_text(encoding="utf-8")
+                  original = text
+
+                  for key, value in replacements.items():
+                      pattern = (
+                          r'(<string\b[^>]*\bname="' +
+                          re.escape(key) +
+                          r'"[^>]*>).*?(</string>)'
+                      )
+                      text = re.sub(
+                          pattern,
+                          lambda m: m.group(1) + value + m.group(2),
+                          text,
+                          flags=re.DOTALL,
+                      )
+
+                  if text != original:
+                      file.write_text(text, encoding="utf-8")
+                      changed += 1
+
+          print(f"Updated app-name resources in {changed} files.")
+          print(
+              "Requested version:",
+              os.environ.get("APP_VERSION", "1.0.0")
+          )
+          PY
 
       - name: Install Android native tools
         shell: bash
@@ -45,7 +105,7 @@ jobs:
           fi
 
           if [ -z "${SDKMANAGER:-}" ] || [ ! -x "$SDKMANAGER" ]; then
-            echo "sdkmanager not found: ${ANDROID_HOME}"
+            echo "sdkmanager not found"
             exit 1
           fi
 
@@ -62,7 +122,6 @@ jobs:
         run: |
           java -version
           python --version
-          python3.11 --version
           git --version
 
       - name: Build Android APK
@@ -136,7 +195,7 @@ jobs:
 
           rm -f "$KEYSTORE"
 
-      - name: Upload signed APK artifact
+      - name: Upload signed APK
         uses: actions/upload-artifact@v4
         with:
           name: VEDAgram-Android-APK
