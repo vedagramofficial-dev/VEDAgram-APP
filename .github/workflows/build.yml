@@ -71,16 +71,75 @@ jobs:
           ./gradlew --no-daemon \
             :TMessagesProj_App:assembleAfatRelease
 
-      - name: Find generated APKs
+      - name: Sign APK with VEDAgram release key
         shell: bash
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
-          find . -type f -name "*.apk" -print
+          set -euo pipefail
 
-      - name: Upload APK artifact
+          for name in \
+            ANDROID_KEYSTORE_BASE64 \
+            ANDROID_KEYSTORE_PASSWORD \
+            ANDROID_KEY_ALIAS \
+            ANDROID_KEY_PASSWORD
+          do
+            if [ -z "${!name:-}" ]; then
+              echo "Missing GitHub Secret: $name"
+              exit 1
+            fi
+          done
+
+          KEYSTORE="$RUNNER_TEMP/vedagram-release.jks"
+          SIGN_DIR="$GITHUB_WORKSPACE/signed-apks"
+          APKSIGNER="$ANDROID_HOME/build-tools/36.0.0/apksigner"
+
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" \
+            | base64 --decode > "$KEYSTORE"
+
+          test -s "$KEYSTORE"
+          test -x "$APKSIGNER"
+
+          mkdir -p "$SIGN_DIR"
+
+          mapfile -d '' APKS < <(
+            find TMessagesProj_App/build/outputs/apk \
+              -type f -name '*.apk' -print0
+          )
+
+          if [ "${#APKS[@]}" -eq 0 ]; then
+            echo "No APK files were found."
+            exit 1
+          fi
+
+          for APK in "${APKS[@]}"; do
+            RELATIVE_PATH="${APK#TMessagesProj_App/build/outputs/apk/}"
+            OUTPUT="$SIGN_DIR/$RELATIVE_PATH"
+
+            mkdir -p "$(dirname "$OUTPUT")"
+
+            "$APKSIGNER" sign \
+              --ks "$KEYSTORE" \
+              --ks-key-alias "$ANDROID_KEY_ALIAS" \
+              --ks-pass env:ANDROID_KEYSTORE_PASSWORD \
+              --key-pass env:ANDROID_KEY_PASSWORD \
+              --out "$OUTPUT" \
+              "$APK"
+
+            "$APKSIGNER" verify --verbose --print-certs "$OUTPUT"
+
+            echo "Successfully signed: $RELATIVE_PATH"
+          done
+
+          rm -f "$KEYSTORE"
+
+      - name: Upload signed APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: VEDAgram-Android-APK
-          path: |
-            TMessagesProj_App/build/outputs/apk/**/*.apk
+          path: signed-apks/**/*.apk
           if-no-files-found: error
           retention-days: 7
