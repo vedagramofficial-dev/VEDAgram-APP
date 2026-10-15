@@ -16,14 +16,14 @@ jobs:
           ref: main
           submodules: recursive
           fetch-depth: 0
-          path: NimarkoGram
 
-      - name: Check project
-        working-directory: NimarkoGram
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Check Gradle project
         run: |
-          echo "Checking Android project..."
-          git submodule status
-          find . -maxdepth 3 \
-            \( -name gradlew -o -name settings.gradle \
-            -o -name settings.gradle.kts \) -print
-    
+          chmod +x gradlew
+          ./gradlew projects
