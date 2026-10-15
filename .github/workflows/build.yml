@@ -7,7 +7,7 @@ on:
       version_name:
         description: "VEDAgram version name"
         required: true
-        default: "1.0.0"
+        default: "13.0.2"
 
 permissions:
   contents: read
@@ -36,14 +36,11 @@ jobs:
           python-version: "3.11"
 
       - name: Apply VEDAgram branding
-        env:
-          APP_VERSION: ${{ inputs.version_name }}
         shell: bash
         run: |
           set -euo pipefail
 
           python - <<'PY'
-          import os
           import re
           from pathlib import Path
 
@@ -85,11 +82,60 @@ jobs:
                       file.write_text(text, encoding="utf-8")
                       changed += 1
 
-          print(f"Updated app-name resources in {changed} files.")
-          print(
-              "Requested version:",
-              os.environ.get("APP_VERSION", "1.0.0")
+          print(f"Updated app name in {changed} resource files.")
+          PY
+
+      - name: Set real Android version
+        shell: bash
+        env:
+          APP_VERSION: ${{ inputs.version_name }}
+          BUILD_NUMBER: ${{ github.run_number }}
+        run: |
+          set -euo pipefail
+
+          python - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          path = Path("gradle.properties")
+          text = path.read_text(encoding="utf-8")
+
+          version_name = os.environ["APP_VERSION"].strip()
+          build_number = int(os.environ["BUILD_NUMBER"])
+
+          if not re.fullmatch(r"\d+\.\d+\.\d+", version_name):
+              raise SystemExit(
+                  "Version must use format like 13.0.2"
+              )
+
+          # Keep Android versionCode increasing across workflow runs.
+          version_code = 7553 + build_number
+
+          def set_property(content, key, value):
+              pattern = rf"(?m)^{re.escape(key)}=.*$"
+              line = f"{key}={value}"
+
+              if re.search(pattern, content):
+                  return re.sub(
+                      pattern,
+                      lambda _: line,
+                      content,
+                  )
+
+              return content.rstrip() + "\n" + line + "\n"
+
+          text = set_property(
+              text, "APP_VERSION_NAME", version_name
           )
+          text = set_property(
+              text, "APP_VERSION_CODE", str(version_code)
+          )
+
+          path.write_text(text, encoding="utf-8")
+
+          print(f"versionName = {version_name}")
+          print(f"versionCode = {version_code}")
           PY
 
       - name: Install Android native tools
@@ -124,9 +170,40 @@ jobs:
           python --version
           git --version
 
-      - name: Build Android APK
+      - name: Prepare pinned Media3 source
+        shell: bash
         run: |
+          set -euo pipefail
+
+          MEDIA_DIR="TMessagesProj_Modules/media"
+          REVISION="c430d207677071b1873f9f18266d55ec45722180"
+
+          test -f patches/media3-ffmpeg-video.patch
+
+          rm -rf "$MEDIA_DIR"
+
+          git clone \
+            https://github.com/Arseny271/media.git \
+            "$MEDIA_DIR"
+
+          git -C "$MEDIA_DIR" checkout --detach "$REVISION"
+
+          ACTUAL="$(git -C "$MEDIA_DIR" rev-parse HEAD)"
+
+          if [ "$ACTUAL" != "$REVISION" ]; then
+            echo "Incorrect Media3 revision: $ACTUAL"
+            exit 1
+          fi
+
+          echo "Pinned Media3 revision restored: $ACTUAL"
+
+      - name: Build Android APK
+        shell: bash
+        run: |
+          set -euo pipefail
+
           chmod +x gradlew
+
           ./gradlew --no-daemon \
             :TMessagesProj_App:assembleAfatRelease
 
