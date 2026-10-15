@@ -1,0 +1,29 @@
+
+name: VEDAgram Android Build
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout NimarkoGram with submodules
+        uses: actions/checkout@v4
+        with:
+          repository: Ettacent/NimarkoGram
+          ref: main
+          submodules: recursive
+          fetch-depth: 0
+          path: NimarkoGram
+
+      - name: Check project
+        working-directory: NimarkoGram
+        run: |
+          echo "Checking Android project..."
+          git submodule status
+          find . -maxdepth 3 \
+            \( -name gradlew -o -name settings.gradle \
+            -o -name settings.gradle.kts \) -print
+    
