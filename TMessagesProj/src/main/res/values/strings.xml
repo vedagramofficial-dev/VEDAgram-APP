@@ -12508,4 +12508,5 @@
     <string name="NM_CAM_RoundAudioInfo">For new video messages. Microphone support depends on the device; mono fallback is automatic.</string>
     <string name="NM_MotionBlur">Motion blur</string>
     <string name="NM_MotionBlur_Desc">Adds motion blur to the app interface. May use more GPU power.</string>
+<string name="NimarkoGramSettings">VEDAgram Settings</string>
 </resources>
